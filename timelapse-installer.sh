@@ -137,7 +137,7 @@ check_requirements() {
     
     # Check if running on Raspberry Pi
     if [[ -f /proc/device-tree/model ]]; then
-        PI_MODEL=$(cat /proc/device-tree/model)
+        PI_MODEL=$(tr -d '\0' < /proc/device-tree/model)
         log_info "Detected: $PI_MODEL"
     fi
     
@@ -241,54 +241,90 @@ configure_wifi() {
     
     if [[ ! -f "$WPA_CONF" ]]; then
         # Create basic wpa_supplicant.conf if it doesn't exist
-        bash -c "cat > '$WPA_CONF' <<EOF
+        cat > "$WPA_CONF" <<EOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
 country=IE
 
-EOF"
+EOF
         log_info "Created new wpa_supplicant.conf"
     fi
     
-    # Show current networks
-    echo "Current WiFi networks:"
-    if grep -q "^network=" "$WPA_CONF"; then
+    # Show current connection status (informational only)
+    echo "Current network status:"
+    if command -v iwgetid &> /dev/null; then
+        current_ssid=$(iwgetid -r 2>/dev/null || echo "")
+        if [[ -n "$current_ssid" ]]; then
+            echo "  ${GREEN}✓${NC} Currently connected to WiFi: $current_ssid"
+            ip addr show wlan0 2>/dev/null | grep "inet " | awk '{print "  IP Address: " $2}' || true
+        else
+            # Check if wired connection exists
+            if ip addr show eth0 2>/dev/null | grep -q "state UP"; then
+                echo "  ${GREEN}✓${NC} Connected via Ethernet"
+                ip addr show eth0 | grep "inet " | awk '{print "  IP Address: " $2}'
+            else
+                echo "  ${YELLOW}⚠${NC} Not currently connected to any network"
+            fi
+        fi
+    fi
+    echo
+    
+    # Show currently configured WiFi networks
+    echo "WiFi networks configured in wpa_supplicant.conf:"
+    if grep -q "^[[:space:]]*network=" "$WPA_CONF" 2>/dev/null; then
         grep "ssid=" "$WPA_CONF" | sed 's/.*ssid="\(.*\)".*/  - \1/'
     else
-        echo "  (none configured)"
+        echo "  (none configured yet)"
     fi
+    echo
+    
+    log_info "You can configure WiFi networks that the Pi will connect to"
+    log_info "when available (useful for multiple locations/job sites)"
     echo
     
     read -p "Configure WiFi networks? (y/n): " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "Skipping WiFi configuration"
-        return
+        return 0
     fi
     
     # Add networks
     while true; do
+        echo
         read -rp "WiFi SSID (or press Enter to finish): " wifi_ssid
         
         if [[ -z "$wifi_ssid" ]]; then
             break
         fi
         
+        # Check if this SSID already exists
+        if grep -q "ssid=\"$wifi_ssid\"" "$WPA_CONF" 2>/dev/null; then
+            log_warning "Network '$wifi_ssid' is already configured"
+            read -p "Reconfigure it? (y/n): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                continue
+            fi
+            # Remove existing entry
+            # This is a bit tricky - we need to remove the entire network block
+            sed -i "/network={/,/}/{ /ssid=\"$wifi_ssid\"/,/^}/d; }" "$WPA_CONF"
+        fi
+        
         read -rsp "WiFi Password: " wifi_password
         echo
         
         if [[ -z "$wifi_password" ]]; then
-            echo "Error: Password cannot be empty" >&2
+            log_error "Password cannot be empty"
             continue
         fi
         
         # Generate PSK using wpa_passphrase
-        wpa_passphrase "$wifi_ssid" "$wifi_password" >> "$WPA_CONF" 2>&1 &
-        show_animated_progress $! "Adding network: $wifi_ssid"
+        log_info "Adding network: $wifi_ssid"
+        wpa_passphrase "$wifi_ssid" "$wifi_password" >> "$WPA_CONF"
+        echo -e "  ${GREEN}✓${NC} Added: $wifi_ssid"
         
-        echo -e "\r  ${GREEN}✓${NC} Added: $wifi_ssid                                        "
         echo
-        
         read -p "Add another WiFi network? (y/n): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -296,34 +332,42 @@ EOF"
         fi
     done
     
-    # Show summary
+    # Show summary of all configured networks
     echo
-    echo "WiFi networks configured:"
+    echo "All WiFi networks now configured:"
     grep "ssid=" "$WPA_CONF" | sed 's/.*ssid="\(.*\)".*/  - \1/'
     echo
     
-    # Reconfigure WiFi
-    wpa_cli -i wlan0 reconfigure > /dev/null 2>&1 &
-    show_animated_progress $! "Applying WiFi configuration"
-    echo -e "\r  ${GREEN}✓${NC} WiFi configuration applied                                        "
-    
-    echo
-    
-    # Show current connection status
-    echo "Current WiFi status:"
-    sleep 2  # Give it a moment to connect
-    if command -v iwgetid &> /dev/null; then
-        current_ssid=$(iwgetid -r)
+    # Reconfigure WiFi (only if wlan0 exists)
+    if ip link show wlan0 &> /dev/null; then
+        log_info "Applying WiFi configuration..."
+        wpa_cli -i wlan0 reconfigure > /dev/null 2>&1 || true
+        echo -e "  ${GREEN}✓${NC} WiFi configuration applied"
+        
+        echo
+        log_info "The Pi will automatically connect to any configured network"
+        log_info "when it's in range. No need to be connected now."
+        
+        # Give it a moment and show status
+        sleep 3
+        echo
+        echo "Current WiFi status:"
+        current_ssid=$(iwgetid -r 2>/dev/null || echo "")
         if [[ -n "$current_ssid" ]]; then
             echo "  ${GREEN}✓${NC} Connected to: $current_ssid"
-            ip addr show wlan0 | grep "inet " | awk '{print "  IP Address: " $2}'
+            ip addr show wlan0 2>/dev/null | grep "inet " | awk '{print "  IP Address: " $2}' || true
         else
-            echo "  ${YELLOW}⚠${NC} Not connected yet"
-            echo "  The Pi will connect to one of the configured networks shortly"
+            echo "  ${YELLOW}⚠${NC} Not connected to WiFi right now"
+            echo "  (Will connect automatically when in range of a configured network)"
         fi
+    else
+        log_warning "No WiFi interface (wlan0) detected"
+        log_info "WiFi networks saved - will be used when WiFi hardware is available"
     fi
+    
     echo
 }
+
 
 ########################################
 # RASPBERRY PI CONNECT
