@@ -365,28 +365,7 @@ install_rpi_connect() {
     # Check if already installed
     if command -v rpi-connect &> /dev/null; then
         log_warning "rpi-connect is already installed"
-        
-        # Check if it's running (as the user)
-        if sudo -u "$ACTUAL_USER" rpi-connect status &> /dev/null; then
-            log_info "rpi-connect is already running"
-        else
-            log_info "Starting rpi-connect..."
-            if sudo -u "$ACTUAL_USER" rpi-connect on; then
-                echo -e "  ${GREEN}✓${NC} rpi-connect started"
-            else
-                log_warning "Failed to start rpi-connect"
-            fi
-        fi
-        
-        # Still offer to sign in
-        read -p "Sign in to Raspberry Pi Connect now? (y/n): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "Opening sign-in process..."
-            sudo -u "$ACTUAL_USER" rpi-connect signin || log_warning "Sign-in process failed"
-        else
-            log_info "You can sign in later with: rpi-connect signin"
-        fi
+        log_info "You can manage it with: rpi-connect on/off/signin"
         return 0
     fi
     
@@ -409,74 +388,29 @@ install_rpi_connect() {
     echo
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Enable user lingering FIRST (so remote shell works when not logged in)
+    # Enable user lingering (so remote shell works when not logged in)
     log_info "Enabling user lingering for $ACTUAL_USER..."
     if loginctl enable-linger "$ACTUAL_USER" 2>/dev/null; then
         echo -e "  ${GREEN}✓${NC} User lingering enabled"
-        log_info "Remote shell will work even when not logged in"
     else
         echo -e "  ${YELLOW}⚠${NC} Failed to enable user lingering"
-        log_info "You may need to be logged in for remote access to work"
-    fi
-    
-    # Start rpi-connect as the regular user (not root)
-    echo
-    log_info "Starting Raspberry Pi Connect as user $ACTUAL_USER..."
-    if sudo -u "$ACTUAL_USER" rpi-connect on; then
-        echo -e "  ${GREEN}✓${NC} Raspberry Pi Connect started"
-    else
-        echo -e "  ${RED}✗${NC} Failed to start Raspberry Pi Connect"
-        log_warning "rpi-connect needs to run as a regular user, not root"
-        log_info "After installation, run as $ACTUAL_USER: rpi-connect on"
     fi
     
     echo
     log_success "Raspberry Pi Connect Lite installed"
-    
-    # Check if running (as the user)
-    if sudo -u "$ACTUAL_USER" rpi-connect status &> /dev/null; then
-        echo "  ${GREEN}✓${NC} Connect is running"
-    else
-        echo -e "  ${YELLOW}⚠${NC} Connect is not running"
-        log_info "Start it as $ACTUAL_USER with: rpi-connect on"
-    fi
-    
-    echo
-    log_info "To access this Pi remotely:"
-    log_info "  1. Sign in at https://connect.raspberrypi.com"
-    log_info "  2. Link this device using the verification code"
-    log_info "  3. Access remote shell from any browser"
     echo
     
-    read -p "Sign in to Raspberry Pi Connect now? (y/n): " -n 1 -r
+    log_info "IMPORTANT: rpi-connect must be started as a regular user"
+    log_info "After this installer completes, log in as $ACTUAL_USER and run:"
     echo
-    
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo
-        log_info "Opening sign-in process as $ACTUAL_USER..."
-        log_info "This will generate a verification URL"
-        echo
-        
-        if sudo -u "$ACTUAL_USER" rpi-connect signin; then
-            echo
-            log_success "Sign-in process completed"
-            log_info "Your Pi should now appear at https://connect.raspberrypi.com"
-        else
-            echo
-            log_warning "Sign-in process failed or was cancelled"
-            log_info "You can sign in later with: rpi-connect signin (as $ACTUAL_USER)"
-        fi
-    else
-        log_info "You can sign in later with: rpi-connect signin (as $ACTUAL_USER)"
-        log_info "Visit https://connect.raspberrypi.com/verify/XXXX-XXXX"
-    fi
-    
+    echo -e "  ${YELLOW}rpi-connect on${NC}       # Start the service"
+    echo -e "  ${YELLOW}rpi-connect signin${NC}   # Link with your Raspberry Pi ID"
+    echo
+    log_info "Then access your Pi at: https://connect.raspberrypi.com"
     echo
     
     return 0
 }
-
-
 
 ########################################
 # DIRECTORY CREATION
@@ -519,6 +453,7 @@ prompt_decrypt_password() {
         echo
         log_info "Configuration files are encrypted for security"
         log_info "You need the decryption password to continue"
+        log_info "(This password will be used for both Google Drive and email config)"
         echo
         
         read -sp "Enter decryption password: " DECRYPT_PASSWORD || {
@@ -536,48 +471,82 @@ prompt_decrypt_password() {
     fi
 }
 
-download_and_decrypt() {
-    local url="$1"
-    local output_file="$2"
-    local temp_encrypted=$(mktemp)
+
+########################################
+# RASPBERRY PI CONNECT
+########################################
+install_rpi_connect() {
+    echo
+    log_info "═══════════════════════════════════════════════════════"
+    log_info "  RASPBERRY PI CONNECT (REMOTE ACCESS)"
+    log_info "═══════════════════════════════════════════════════════"
+    echo
     
-    log_info "Downloading encrypted file..."
+    log_info "Raspberry Pi Connect Lite provides remote shell access"
+    log_info "to your Pi from anywhere via connect.raspberrypi.com"
+    echo
     
-    # Download encrypted file with progress
-    if curl -fsSL "$url" -o "$temp_encrypted"; then
-        echo -e "  ${GREEN}✓${NC} Downloaded encrypted file"
-    else
-        echo -e "  ${RED}✗${NC} Failed to download from: $url"
-        rm -f "$temp_encrypted"
-        return 1
-    fi
+    read -p "Install Raspberry Pi Connect Lite? (y/n): " -n 1 -r
+    echo
     
-    # Check if file is actually encrypted
-    if ! file "$temp_encrypted" 2>/dev/null | grep -q "GPG"; then
-        log_error "Downloaded file is not GPG encrypted"
-        log_error "File type: $(file "$temp_encrypted")"
-        rm -f "$temp_encrypted"
-        return 1
-    fi
-    
-    # Decrypt file
-    log_info "Decrypting file..."
-    if echo "$DECRYPT_PASSWORD" | gpg --decrypt --batch --yes \
-        --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/tmp/gpg-error.log; then
-        rm -f "$temp_encrypted"
-        echo -e "  ${GREEN}✓${NC} Decrypted successfully"
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "Skipping Raspberry Pi Connect installation"
         return 0
-    else
-        echo -e "  ${RED}✗${NC} Decryption failed"
-        log_error "GPG error: $(cat /tmp/gpg-error.log 2>/dev/null || echo 'Unknown error')"
-        log_error "Possible causes:"
-        log_error "  - Incorrect password"
-        log_error "  - File is corrupted"
-        log_error "  - GPG key mismatch"
-        rm -f "$temp_encrypted" "$output_file" /tmp/gpg-error.log
-        return 1
     fi
+    
+    # Get the actual user (not root)
+    ACTUAL_USER="${SUDO_USER:-admin}"
+    
+    # Check if already installed
+    if command -v rpi-connect &> /dev/null; then
+        log_warning "rpi-connect is already installed"
+        log_info "You can manage it with: rpi-connect on/off/signin"
+        return 0
+    fi
+    
+    # Install Raspberry Pi Connect Lite
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${CYAN}Installing rpi-connect-lite package${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+    
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y rpi-connect-lite; then
+        echo
+        echo -e "  ${GREEN}✓${NC} rpi-connect-lite package installed"
+    else
+        echo
+        echo -e "  ${RED}✗${NC} Failed to install rpi-connect-lite"
+        log_info "You can install it manually later with: sudo apt install rpi-connect-lite"
+        return 0
+    fi
+    
+    echo
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    # Enable user lingering (so remote shell works when not logged in)
+    log_info "Enabling user lingering for $ACTUAL_USER..."
+    if loginctl enable-linger "$ACTUAL_USER" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} User lingering enabled"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Failed to enable user lingering"
+    fi
+    
+    echo
+    log_success "Raspberry Pi Connect Lite installed"
+    echo
+    
+    log_info "IMPORTANT: rpi-connect must be started as a regular user"
+    log_info "After this installer completes, log in as $ACTUAL_USER and run:"
+    echo
+    echo -e "  ${YELLOW}rpi-connect on${NC}       # Start the service"
+    echo -e "  ${YELLOW}rpi-connect signin${NC}   # Link with your Raspberry Pi ID"
+    echo
+    log_info "Then access your Pi at: https://connect.raspberrypi.com"
+    echo
+    
+    return 0
 }
+
 
 install_gcloud_json() {
     log_info "Installing Google Cloud service account credentials..."
@@ -607,109 +576,33 @@ install_gcloud_json() {
             echo "$json_dest"
             return 0
         else
+            echo
             log_error "Decrypted file is not valid JSON"
+            log_error "File contents:"
+            head -n 5 "$json_dest" 2>/dev/null || echo "(unable to read file)"
             rm -f "$json_dest"
             return 1
         fi
     else
+        echo
         log_error "Could not download/decrypt service account JSON"
+        log_error "URL: $GCLOUD_JSON_URL"
         log_error "Please check:"
-        log_error "  1. The file exists at: $GCLOUD_JSON_URL"
+        log_error "  1. The file exists at the URL above"
         log_error "  2. The decryption password is correct"
         log_error "  3. You have internet connectivity"
+        
+        # Test if we can reach the URL
+        if curl -fsSL --head "$GCLOUD_JSON_URL" &> /dev/null; then
+            log_info "✓ URL is reachable"
+        else
+            log_error "✗ Cannot reach URL - check your internet connection"
+        fi
+        
         return 1
     fi
 }
 
-configure_rclone() {
-    echo
-    log_info "═══════════════════════════════════════════════════════"
-    log_info "  GOOGLE DRIVE CONFIGURATION"
-    log_info "═══════════════════════════════════════════════════════"
-    echo
-    
-    if [[ -f "/root/.config/rclone/rclone.conf" ]]; then
-        log_warning "rclone configuration already exists"
-        read -p "Reconfigure rclone? (y/n): " -n 1 -r || {
-            echo
-            log_info "Using existing rclone configuration"
-            return 0
-        }
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            # Test existing config
-            if rclone listremotes 2>/dev/null | grep -q "aperturetimelapsedrive"; then
-                log_success "Using existing rclone configuration"
-                return 0
-            fi
-        fi
-    fi
-    
-    # Install JSON file (will auto-download and decrypt)
-    if ! json_path=$(install_gcloud_json); then
-        log_error "Failed to install service account JSON"
-        echo
-        log_info "Skipping rclone configuration"
-        log_info "You can configure manually later with: sudo rclone config"
-        echo
-        return 0  # Don't fail the entire installation
-    fi
-    
-    if [[ -z "$json_path" ]] || [[ ! -f "$json_path" ]]; then
-        log_error "Service account JSON file not found at: $json_path"
-        log_info "Skipping rclone configuration"
-        return 0
-    fi
-    
-    # Create rclone config automatically
-    log_info "Creating rclone configuration..."
-    cat > /root/.config/rclone/rclone.conf << EOF
-[aperturetimelapsedrive]
-type = drive
-scope = drive
-service_account_file = $json_path
-team_drive = 
-EOF
-    
-    chmod 600 /root/.config/rclone/rclone.conf
-    echo -e "  ${GREEN}✓${NC} rclone configuration created"
-    
-    # Test connection
-    echo
-    log_info "Testing Google Drive connection..."
-    if timeout 10 rclone lsd aperturetimelapsedrive: > /dev/null 2>&1; then
-        echo -e "  ${GREEN}✓${NC} Google Drive connection successful"
-        log_info "Remote name: aperturetimelapsedrive"
-        echo
-        log_success "Google Drive configured successfully"
-    else
-        echo -e "  ${RED}✗${NC} Google Drive connection failed"
-        echo
-        log_warning "Connection test failed. This could mean:"
-        log_warning "  1. The service account JSON is incorrect"
-        log_warning "  2. The Drive folder hasn't been shared with the service account"
-        log_warning "  3. Network connectivity issues"
-        echo
-        
-        local sa_email=$(jq -r '.client_email' "$json_dest" 2>/dev/null || echo 'unknown')
-        log_info "Service account email: $sa_email"
-        log_info "Make sure you've shared your Google Drive folder with this email!"
-        echo
-        
-        read -p "Continue anyway? (y/n): " -n 1 -r || {
-            echo
-            log_info "Continuing installation..."
-            return 0
-        }
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log_info "You can reconfigure later with: sudo rclone config"
-            return 0
-        fi
-    fi
-    
-    return 0
-}
 
 install_msmtp_config() {
     log_info "Installing email (msmtp) configuration..."
