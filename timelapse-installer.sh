@@ -409,51 +409,59 @@ install_rpi_connect() {
     
     read -p "Install Raspberry Pi Connect for remote access? (y/n): " -n 1 -r
     echo
+    
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "Skipping Raspberry Pi Connect installation"
-        return
+        return 0
     fi
     
     # Check if already installed
     if command -v rpi-connect &> /dev/null; then
         log_warning "Raspberry Pi Connect is already installed"
-        return
+        return 0
     fi
     
     # Check if running on actual Raspberry Pi
-    if [[ ! -f /proc/device-tree/model ]] || ! grep -q "Raspberry Pi" /proc/device-tree/model; then
+    if [[ ! -f /proc/device-tree/model ]] || ! grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
         log_warning "Not running on a Raspberry Pi"
         read -p "Install Raspberry Pi Connect anyway? (y/n): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             log_info "Skipping Raspberry Pi Connect installation"
-            return
+            return 0
         fi
     fi
     
     # Install Raspberry Pi Connect
-    apt-get install -y rpi-connect > /tmp/rpi-connect-install.log 2>&1 &
-    show_animated_progress $! "Installing rpi-connect package"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo -e "${CYAN}Installing rpi-connect package${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
     
-    if wait $!; then
-        echo -e "\r  ${GREEN}✓${NC} rpi-connect package installed                                        "
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y rpi-connect; then
+        echo
+        echo -e "  ${GREEN}✓${NC} rpi-connect package installed"
     else
-        echo -e "\r  ${RED}✗${NC} Failed to install rpi-connect                                        "
+        echo
+        echo -e "  ${RED}✗${NC} Failed to install rpi-connect"
         log_info "You can install it manually later with: sudo apt install rpi-connect"
-        return
+        return 0
     fi
     
+    echo
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
     # Enable and start the service
-    systemctl enable rpi-connect > /dev/null 2>&1 &
-    systemctl start rpi-connect > /dev/null 2>&1 &
-    show_animated_progress $! "Enabling Raspberry Pi Connect service"
-    echo -e "\r  ${GREEN}✓${NC} Raspberry Pi Connect service enabled                                        "
+    log_info "Enabling Raspberry Pi Connect service..."
+    systemctl enable rpi-connect > /dev/null 2>&1 || true
+    systemctl start rpi-connect > /dev/null 2>&1 || true
+    echo -e "  ${GREEN}✓${NC} Raspberry Pi Connect service enabled"
     
     # Enable user lingering (so remote shell works when not logged in)
     ACTUAL_USER="${SUDO_USER:-admin}"
-    loginctl enable-linger "$ACTUAL_USER" 2>/dev/null &
-    show_animated_progress $! "Enabling user lingering for remote shell"
-    echo -e "\r  ${GREEN}✓${NC} User lingering enabled for $ACTUAL_USER                                        "
+    log_info "Enabling user lingering for remote shell..."
+    loginctl enable-linger "$ACTUAL_USER" 2>/dev/null || true
+    echo -e "  ${GREEN}✓${NC} User lingering enabled for $ACTUAL_USER"
     
     echo
     log_success "Raspberry Pi Connect installed"
@@ -474,19 +482,23 @@ install_rpi_connect() {
     
     read -p "Sign in to Raspberry Pi Connect now? (y/n): " -n 1 -r
     echo
+    
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         log_info "Opening sign-in process..."
         if [[ -n "${SUDO_USER:-}" ]]; then
-            sudo -u "$SUDO_USER" rpi-connect signin
+            sudo -u "$SUDO_USER" rpi-connect signin || true
         else
-            rpi-connect signin
+            rpi-connect signin || true
         fi
         log_success "Raspberry Pi Connect sign-in process completed"
     else
         log_info "You can sign in later with: rpi-connect signin"
     fi
     echo
+    
+    return 0
 }
+
 
 ########################################
 # DIRECTORY CREATION
