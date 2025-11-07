@@ -548,37 +548,16 @@ prompt_decrypt_password() {
         log_info "You need the decryption password to continue"
         echo
         
-        # Read password with asterisk feedback
-        DECRYPT_PASSWORD=""
-        echo -n "Enter decryption password: "
-        
-        while IFS= read -r -s -n 1 char; do
-            # Enter key (empty char)
-            if [[ -z "$char" ]]; then
-                echo  # Newline
-                break
-            fi
-            
-            # Backspace or Delete
-            if [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\x08' ]]; then
-                if [[ -n "$DECRYPT_PASSWORD" ]]; then
-                    DECRYPT_PASSWORD="${DECRYPT_PASSWORD%?}"
-                    echo -ne '\b \b'  # Erase the last asterisk
-                fi
-            else
-                # Regular character
-                DECRYPT_PASSWORD+="$char"
-                echo -n '*'
-            fi
-        done
+        read -sp "Enter decryption password: " DECRYPT_PASSWORD
+        echo  # Newline after password entry
         
         if [[ -z "$DECRYPT_PASSWORD" ]]; then
-            echo
             log_error "Password cannot be empty"
             exit 1
         fi
     fi
 }
+
 
 
 download_and_decrypt() {
