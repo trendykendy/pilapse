@@ -547,8 +547,25 @@ prompt_decrypt_password() {
         log_info "Configuration files are encrypted for security"
         log_info "You need the decryption password to continue"
         echo
-        read -sp "Enter decryption password: " DECRYPT_PASSWORD
-        echo
+        
+        # Read password with asterisk feedback
+        DECRYPT_PASSWORD=""
+        prompt="Enter decryption password: "
+        while IFS= read -p "$prompt" -r -s -n 1 char; do
+            if [[ $char == $'\0' ]]; then
+                break
+            fi
+            if [[ $char == $'\177' ]]; then  # Backspace
+                if [[ -n "$DECRYPT_PASSWORD" ]]; then
+                    DECRYPT_PASSWORD="${DECRYPT_PASSWORD%?}"
+                    prompt=$'\b \b'
+                fi
+            else
+                DECRYPT_PASSWORD+="$char"
+                prompt='*'
+            fi
+        done
+        echo  # Newline after password entry
         
         if [[ -z "$DECRYPT_PASSWORD" ]]; then
             log_error "Password cannot be empty"
@@ -562,35 +579,33 @@ download_and_decrypt() {
     local output_file="$2"
     local temp_encrypted=$(mktemp)
     
-    # Download encrypted file
-    curl -fsSL "$url" -o "$temp_encrypted" 2>&1 &
-    show_animated_progress $! "Downloading encrypted file"
+    log_info "Downloading encrypted file..."
     
-    if ! wait $!; then
-        echo -e "\r  ${RED}✗${NC} Failed to download                                        "
+    # Download encrypted file with progress
+    if curl -fsSL "$url" -o "$temp_encrypted"; then
+        echo -e "  ${GREEN}✓${NC} Downloaded encrypted file"
+    else
+        echo -e "  ${RED}✗${NC} Failed to download from: $url"
         rm -f "$temp_encrypted"
         return 1
     fi
-    echo -e "\r  ${GREEN}✓${NC} Downloaded encrypted file                                        "
     
     # Check if file is actually encrypted
     if ! file "$temp_encrypted" | grep -q "GPG"; then
-        echo "  ${RED}✗${NC} File is not GPG encrypted"
+        log_error "Downloaded file is not GPG encrypted"
         rm -f "$temp_encrypted"
         return 1
     fi
     
     # Decrypt file
-    (echo "$DECRYPT_PASSWORD" | gpg --decrypt --batch --yes \
-        --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/dev/null) &
-    show_animated_progress $! "Decrypting file"
-    
-    if wait $!; then
+    log_info "Decrypting file..."
+    if echo "$DECRYPT_PASSWORD" | gpg --decrypt --batch --yes \
+        --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/dev/null; then
         rm -f "$temp_encrypted"
-        echo -e "\r  ${GREEN}✓${NC} Decrypted successfully                                        "
+        echo -e "  ${GREEN}✓${NC} Decrypted successfully"
         return 0
     else
-        echo -e "\r  ${RED}✗${NC} Decryption failed - incorrect password?                                        "
+        echo -e "  ${RED}✗${NC} Decryption failed - incorrect password?"
         rm -f "$temp_encrypted" "$output_file"
         return 1
     fi
@@ -605,16 +620,17 @@ install_gcloud_json() {
     # Prompt for password if not already set
     prompt_decrypt_password
     
-    # Try to download and decrypt from remote
+    # Download and decrypt from remote
     if download_and_decrypt "$GCLOUD_JSON_URL" "$json_dest"; then
         # Verify it's valid JSON
         if jq empty "$json_dest" 2>/dev/null; then
             chmod 644 "$json_dest"
+            chown admin:admin "$json_dest" 2>/dev/null || true
             echo
             log_success "Service account JSON installed"
             
             # Show service account email
-            local sa_email=$(jq -r '.client_email' "$json_dest")
+            local sa_email=$(jq -r '.client_email' "$json_dest" 2>/dev/null || echo "unknown")
             log_info "Service account email: $sa_email"
             echo
             log_warning "Make sure this email has access to your Google Drive folder!"
@@ -625,28 +641,14 @@ install_gcloud_json() {
         else
             log_error "Decrypted file is not valid JSON"
             rm -f "$json_dest"
-        fi
-    else
-        log_warning "Could not download/decrypt service account JSON from remote"
-    fi
-    
-    # Fallback to manual entry
-    log_info "Please provide the service account JSON file manually"
-    read -p "Enter path to local JSON file (or press Enter to skip): " local_json
-    
-    if [[ -n "$local_json" ]] && [[ -f "$local_json" ]]; then
-        if jq empty "$local_json" 2>/dev/null; then
-            cp "$local_json" "$json_dest"
-            chmod 644 "$json_dest"
-            log_success "Service account JSON installed from local file"
-            echo "$json_dest"
-            return 0
-        else
-            log_error "File is not valid JSON: $local_json"
             return 1
         fi
     else
-        log_warning "Skipping Google Cloud JSON installation"
+        log_error "Could not download/decrypt service account JSON"
+        log_error "Please check:"
+        log_error "  1. The file exists at: $GCLOUD_JSON_URL"
+        log_error "  2. The decryption password is correct"
+        log_error "  3. You have internet connectivity"
         return 1
     fi
 }
@@ -671,16 +673,18 @@ configure_rclone() {
         fi
     fi
     
-    # Install JSON file
+    # Install JSON file (will auto-download and decrypt)
     json_path=$(install_gcloud_json)
     
     if [[ -z "$json_path" ]] || [[ ! -f "$json_path" ]]; then
-        log_error "No service account JSON available"
-        log_info "Please configure rclone manually: sudo rclone config"
+        log_error "Failed to install service account JSON"
+        log_info "Skipping rclone configuration"
+        log_info "You can configure manually later with: sudo rclone config"
         return 1
     fi
     
     # Create rclone config automatically
+    log_info "Creating rclone configuration..."
     cat > /root/.config/rclone/rclone.conf << EOF
 [aperturetimelapsedrive]
 type = drive
@@ -690,20 +694,26 @@ team_drive =
 EOF
     
     chmod 600 /root/.config/rclone/rclone.conf
-    echo "  ${GREEN}✓${NC} rclone configuration created"
+    echo -e "  ${GREEN}✓${NC} rclone configuration created"
     
     # Test connection
-    (timeout 10 rclone lsd aperturetimelapsedrive: > /dev/null 2>&1) &
-    show_animated_progress $! "Testing Google Drive connection"
-    
-    if wait $!; then
-        echo -e "\r  ${GREEN}✓${NC} Google Drive connection successful                                        "
+    log_info "Testing Google Drive connection..."
+    if timeout 10 rclone lsd aperturetimelapsedrive: > /dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Google Drive connection successful"
         log_info "Remote name: aperturetimelapsedrive"
+        echo
+        log_success "Google Drive configured successfully"
     else
-        echo -e "\r  ${RED}✗${NC} Google Drive connection failed                                        "
-        log_warning "You may need to:"
-        log_warning "  1. Verify the service account JSON is correct"
-        log_warning "  2. Share your Drive folder with the service account email"
+        echo -e "  ${RED}✗${NC} Google Drive connection failed"
+        echo
+        log_warning "Connection test failed. This could mean:"
+        log_warning "  1. The service account JSON is incorrect"
+        log_warning "  2. The Drive folder hasn't been shared with the service account"
+        log_warning "  3. Network connectivity issues"
+        echo
+        log_info "Service account email: $(jq -r '.client_email' "$json_path" 2>/dev/null || echo 'unknown')"
+        log_info "Make sure you've shared your Google Drive folder with this email!"
+        echo
         
         read -p "Continue anyway? (y/n): " -n 1 -r
         echo
@@ -711,144 +721,10 @@ EOF
             return 1
         fi
     fi
+    
+    return 0
 }
 
-install_msmtp_config() {
-    log_info "Installing email (msmtp) configuration..."
-    echo
-    
-    local msmtprc_dest="/root/.msmtprc"
-    
-    # Prompt for password if not already set
-    prompt_decrypt_password
-    
-    # Try to download and decrypt from remote
-    if download_and_decrypt "$MSMTP_CONFIG_URL" "$msmtprc_dest"; then
-        chmod 600 "$msmtprc_dest"
-        echo
-        log_success "msmtp configuration installed"
-        
-        # Show configured email
-        local from_email=$(grep "^from" "$msmtprc_dest" | awk '{print $2}')
-        log_info "Email configured: $from_email"
-        
-        return 0
-    else
-        log_warning "Could not download/decrypt msmtp config from remote"
-    fi
-    
-    # Fallback to manual entry
-    log_info "Please provide msmtp configuration"
-    read -p "Enter path to local msmtprc file (or press Enter to configure manually): " local_msmtprc
-    
-    if [[ -n "$local_msmtprc" ]] && [[ -f "$local_msmtprc" ]]; then
-        cp "$local_msmtprc" "$msmtprc_dest"
-        chmod 600 "$msmtprc_dest"
-        log_success "msmtp configuration installed from local file"
-        return 0
-    else
-        log_info "Manual configuration required"
-        return 1
-    fi
-}
-
-configure_email() {
-    echo
-    log_info "═══════════════════════════════════════════════════════"
-    log_info "  EMAIL CONFIGURATION"
-    log_info "═══════════════════════════════════════════════════════"
-    echo
-    
-    if [[ -f "/root/.msmtprc" ]]; then
-        log_warning "msmtp configuration already exists"
-        read -p "Reconfigure email? (y/n): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log_success "Using existing msmtp configuration"
-            return 0
-        fi
-    fi
-    
-    # Try to install from remote first
-    if install_msmtp_config; then
-        # Test the configuration
-        log_info "Testing email configuration..."
-        read -p "Send test email? (y/n): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            read -p "Test email recipient: " test_recipient
-            
-            (echo -e "Subject: Timelapse Installer Test\n\nThis is a test email from the timelapse installer.\n\nIf you received this, email is configured correctly." | msmtp "$test_recipient" 2>/dev/null) &
-            show_animated_progress $! "Sending test email"
-            
-            if wait $!; then
-                echo -e "\r  ${GREEN}✓${NC} Test email sent successfully                                        "
-                log_info "Check spam folder if not received"
-            else
-                echo -e "\r  ${YELLOW}⚠${NC} Test email may have failed                                        "
-                log_info "Check /root/.msmtp.log for details"
-            fi
-        fi
-        return 0
-    fi
-    
-    # Manual configuration fallback
-    log_info "Manual email configuration..."
-    echo
-    
-    read -p "SMTP Server (e.g., smtp.mxroute.com): " smtp_host
-    read -p "SMTP Port (587 or 465): " smtp_port
-    read -p "From Email Address: " from_email
-    read -p "SMTP Username: " smtp_user
-    read -sp "SMTP Password: " smtp_pass
-    echo
-    
-    # Determine TLS settings based on port
-    if [[ "$smtp_port" == "465" ]]; then
-        tls_starttls="off"
-    else
-        tls_starttls="on"
-    fi
-    
-    # Create msmtprc for root
-    cat > /root/.msmtprc << EOF
-# msmtp configuration
-defaults
-auth           on
-tls            on
-tls_starttls   ${tls_starttls}
-tls_trust_file /etc/ssl/certs/ca-certificates.crt
-logfile        /root/.msmtp.log
-
-account        default
-host           ${smtp_host}
-port           ${smtp_port}
-from           ${from_email}
-user           ${smtp_user}
-password       ${smtp_pass}
-EOF
-    
-    chmod 600 /root/.msmtprc
-    log_success "Email configuration saved"
-    
-    # Test email
-    read -p "Send test email? (y/n): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        read -p "Test email recipient: " test_recipient
-        
-        (echo -e "Subject: Timelapse Test\n\nThis is a test email from the timelapse system." | msmtp "$test_recipient" 2>/dev/null) &
-        show_animated_progress $! "Sending test email"
-        
-        if wait $!; then
-            echo -e "\r  ${GREEN}✓${NC} Test email sent successfully                                        "
-            log_info "Check spam folder if not received"
-        else
-            echo -e "\r  ${RED}✗${NC} Test email failed                                        "
-            log_info "Check /root/.msmtp.log for details"
-        fi
-    fi
-}
 
 ########################################
 # SCRIPT INSTALLATION
