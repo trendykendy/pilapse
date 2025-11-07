@@ -359,16 +359,23 @@ install_rpi_connect() {
         return 0
     fi
     
+    # Get the actual user (not root)
+    ACTUAL_USER="${SUDO_USER:-admin}"
+    
     # Check if already installed
     if command -v rpi-connect &> /dev/null; then
         log_warning "rpi-connect is already installed"
         
-        # Check if it's running
-        if rpi-connect status &> /dev/null; then
+        # Check if it's running (as the user)
+        if sudo -u "$ACTUAL_USER" rpi-connect status &> /dev/null; then
             log_info "rpi-connect is already running"
         else
             log_info "Starting rpi-connect..."
-            rpi-connect on || log_warning "Failed to start rpi-connect"
+            if sudo -u "$ACTUAL_USER" rpi-connect on; then
+                echo -e "  ${GREEN}✓${NC} rpi-connect started"
+            else
+                log_warning "Failed to start rpi-connect"
+            fi
         fi
         
         # Still offer to sign in
@@ -376,7 +383,7 @@ install_rpi_connect() {
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             log_info "Opening sign-in process..."
-            rpi-connect signin || log_warning "Sign-in process failed"
+            sudo -u "$ACTUAL_USER" rpi-connect signin || log_warning "Sign-in process failed"
         else
             log_info "You can sign in later with: rpi-connect signin"
         fi
@@ -402,17 +409,7 @@ install_rpi_connect() {
     echo
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Start rpi-connect
-    log_info "Starting Raspberry Pi Connect..."
-    if rpi-connect on; then
-        echo -e "  ${GREEN}✓${NC} Raspberry Pi Connect started"
-    else
-        echo -e "  ${RED}✗${NC} Failed to start Raspberry Pi Connect"
-        log_warning "You can start it manually with: rpi-connect on"
-    fi
-    
-    # Enable user lingering (so remote shell works when not logged in)
-    ACTUAL_USER="${SUDO_USER:-admin}"
+    # Enable user lingering FIRST (so remote shell works when not logged in)
     log_info "Enabling user lingering for $ACTUAL_USER..."
     if loginctl enable-linger "$ACTUAL_USER" 2>/dev/null; then
         echo -e "  ${GREEN}✓${NC} User lingering enabled"
@@ -422,15 +419,26 @@ install_rpi_connect() {
         log_info "You may need to be logged in for remote access to work"
     fi
     
+    # Start rpi-connect as the regular user (not root)
+    echo
+    log_info "Starting Raspberry Pi Connect as user $ACTUAL_USER..."
+    if sudo -u "$ACTUAL_USER" rpi-connect on; then
+        echo -e "  ${GREEN}✓${NC} Raspberry Pi Connect started"
+    else
+        echo -e "  ${RED}✗${NC} Failed to start Raspberry Pi Connect"
+        log_warning "rpi-connect needs to run as a regular user, not root"
+        log_info "After installation, run as $ACTUAL_USER: rpi-connect on"
+    fi
+    
     echo
     log_success "Raspberry Pi Connect Lite installed"
     
-    # Check if running
-    if rpi-connect status &> /dev/null; then
+    # Check if running (as the user)
+    if sudo -u "$ACTUAL_USER" rpi-connect status &> /dev/null; then
         echo "  ${GREEN}✓${NC} Connect is running"
     else
-        echo "  ${YELLOW}⚠${NC} Connect is not running"
-        log_info "Start it with: rpi-connect on"
+        echo -e "  ${YELLOW}⚠${NC} Connect is not running"
+        log_info "Start it as $ACTUAL_USER with: rpi-connect on"
     fi
     
     echo
@@ -445,21 +453,21 @@ install_rpi_connect() {
     
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo
-        log_info "Opening sign-in process..."
+        log_info "Opening sign-in process as $ACTUAL_USER..."
         log_info "This will generate a verification URL"
         echo
         
-        if rpi-connect signin; then
+        if sudo -u "$ACTUAL_USER" rpi-connect signin; then
             echo
             log_success "Sign-in process completed"
             log_info "Your Pi should now appear at https://connect.raspberrypi.com"
         else
             echo
             log_warning "Sign-in process failed or was cancelled"
-            log_info "You can sign in later with: rpi-connect signin"
+            log_info "You can sign in later with: rpi-connect signin (as $ACTUAL_USER)"
         fi
     else
-        log_info "You can sign in later with: rpi-connect signin"
+        log_info "You can sign in later with: rpi-connect signin (as $ACTUAL_USER)"
         log_info "Visit https://connect.raspberrypi.com/verify/XXXX-XXXX"
     fi
     
@@ -467,6 +475,7 @@ install_rpi_connect() {
     
     return 0
 }
+
 
 
 ########################################
