@@ -347,7 +347,11 @@ install_rpi_connect() {
     log_info "═══════════════════════════════════════════════════════"
     echo
     
-    read -p "Install Raspberry Pi Connect for remote access? (y/n): " -n 1 -r
+    log_info "Raspberry Pi Connect Lite provides remote shell access"
+    log_info "to your Pi from anywhere via connect.raspberrypi.com"
+    echo
+    
+    read -p "Install Raspberry Pi Connect Lite? (y/n): " -n 1 -r
     echo
     
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -357,87 +361,113 @@ install_rpi_connect() {
     
     # Check if already installed
     if command -v rpi-connect &> /dev/null; then
-        log_warning "Raspberry Pi Connect is already installed"
+        log_warning "rpi-connect is already installed"
+        
+        # Check if it's running
+        if rpi-connect status &> /dev/null; then
+            log_info "rpi-connect is already running"
+        else
+            log_info "Starting rpi-connect..."
+            rpi-connect on || log_warning "Failed to start rpi-connect"
+        fi
+        
+        # Still offer to sign in
+        read -p "Sign in to Raspberry Pi Connect now? (y/n): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            log_info "Opening sign-in process..."
+            rpi-connect signin || log_warning "Sign-in process failed"
+        else
+            log_info "You can sign in later with: rpi-connect signin"
+        fi
         return 0
     fi
     
-    # Check if running on actual Raspberry Pi
-    if [[ ! -f /proc/device-tree/model ]] || ! grep -q "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
-        log_warning "Not running on a Raspberry Pi"
-        read -p "Install Raspberry Pi Connect anyway? (y/n): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log_info "Skipping Raspberry Pi Connect installation"
-            return 0
-        fi
-    fi
-    
-    # Install Raspberry Pi Connect
+    # Install Raspberry Pi Connect Lite
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo -e "${CYAN}Installing rpi-connect package${NC}"
+    echo -e "${CYAN}Installing rpi-connect-lite package${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo
     
-    if DEBIAN_FRONTEND=noninteractive apt-get install -y rpi-connect; then
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y rpi-connect-lite; then
         echo
-        echo -e "  ${GREEN}✓${NC} rpi-connect package installed"
+        echo -e "  ${GREEN}✓${NC} rpi-connect-lite package installed"
     else
         echo
-        echo -e "  ${RED}✗${NC} Failed to install rpi-connect"
-        log_info "You can install it manually later with: sudo apt install rpi-connect"
+        echo -e "  ${RED}✗${NC} Failed to install rpi-connect-lite"
+        log_info "You can install it manually later with: sudo apt install rpi-connect-lite"
         return 0
     fi
     
     echo
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Enable and start the service
-    log_info "Enabling Raspberry Pi Connect service..."
-    systemctl enable rpi-connect > /dev/null 2>&1 || true
-    systemctl start rpi-connect > /dev/null 2>&1 || true
-    echo -e "  ${GREEN}✓${NC} Raspberry Pi Connect service enabled"
+    # Start rpi-connect
+    log_info "Starting Raspberry Pi Connect..."
+    if rpi-connect on; then
+        echo -e "  ${GREEN}✓${NC} Raspberry Pi Connect started"
+    else
+        echo -e "  ${RED}✗${NC} Failed to start Raspberry Pi Connect"
+        log_warning "You can start it manually with: rpi-connect on"
+    fi
     
     # Enable user lingering (so remote shell works when not logged in)
     ACTUAL_USER="${SUDO_USER:-admin}"
-    log_info "Enabling user lingering for remote shell..."
-    loginctl enable-linger "$ACTUAL_USER" 2>/dev/null || true
-    echo -e "  ${GREEN}✓${NC} User lingering enabled for $ACTUAL_USER"
-    
-    echo
-    log_success "Raspberry Pi Connect installed"
-    
-    # Check service status
-    if systemctl is-active --quiet rpi-connect; then
-        echo "  ${GREEN}✓${NC} Service is running"
+    log_info "Enabling user lingering for $ACTUAL_USER..."
+    if loginctl enable-linger "$ACTUAL_USER" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} User lingering enabled"
+        log_info "Remote shell will work even when not logged in"
     else
-        echo "  ${YELLOW}⚠${NC} Service failed to start"
+        echo -e "  ${YELLOW}⚠${NC} Failed to enable user lingering"
+        log_info "You may need to be logged in for remote access to work"
     fi
     
     echo
-    log_info "To complete Raspberry Pi Connect setup:"
-    log_info "  1. Go to https://connect.raspberrypi.com"
-    log_info "  2. Sign in with your Raspberry Pi ID"
-    log_info "  3. Run: rpi-connect signin"
+    log_success "Raspberry Pi Connect Lite installed"
+    
+    # Check if running
+    if rpi-connect status &> /dev/null; then
+        echo "  ${GREEN}✓${NC} Connect is running"
+    else
+        echo "  ${YELLOW}⚠${NC} Connect is not running"
+        log_info "Start it with: rpi-connect on"
+    fi
+    
+    echo
+    log_info "To access this Pi remotely:"
+    log_info "  1. Sign in at https://connect.raspberrypi.com"
+    log_info "  2. Link this device using the verification code"
+    log_info "  3. Access remote shell from any browser"
     echo
     
     read -p "Sign in to Raspberry Pi Connect now? (y/n): " -n 1 -r
     echo
     
     if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo
         log_info "Opening sign-in process..."
-        if [[ -n "${SUDO_USER:-}" ]]; then
-            sudo -u "$SUDO_USER" rpi-connect signin || true
+        log_info "This will generate a verification URL"
+        echo
+        
+        if rpi-connect signin; then
+            echo
+            log_success "Sign-in process completed"
+            log_info "Your Pi should now appear at https://connect.raspberrypi.com"
         else
-            rpi-connect signin || true
+            echo
+            log_warning "Sign-in process failed or was cancelled"
+            log_info "You can sign in later with: rpi-connect signin"
         fi
-        log_success "Raspberry Pi Connect sign-in process completed"
     else
         log_info "You can sign in later with: rpi-connect signin"
+        log_info "Visit https://connect.raspberrypi.com/verify/XXXX-XXXX"
     fi
+    
     echo
     
     return 0
 }
+
 
 ########################################
 # DIRECTORY CREATION
