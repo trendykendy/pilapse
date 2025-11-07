@@ -166,6 +166,11 @@ install_dependencies() {
     apt-get update
     echo
     
+    # Pre-configure msmtp to disable AppArmor prompt
+    log_info "Pre-configuring package options..."
+    echo "msmtp msmtp/apparmor boolean false" | debconf-set-selections
+    echo
+    
     local packages=(
         "gphoto2"
         "imagemagick"
@@ -195,8 +200,10 @@ install_dependencies() {
             echo -e "  ${GREEN}✓${NC} $package is already installed"
             echo
         else
-            # Install with live output
-            if apt-get install -y "$package"; then
+            # Install with live output, non-interactive
+            DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
+            
+            if [[ $? -eq 0 ]]; then
                 echo
                 echo -e "  ${GREEN}✓${NC} $package installed successfully"
                 echo
@@ -217,6 +224,7 @@ install_dependencies() {
     log_success "All dependencies installed"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
+
 
 ########################################
 # WIFI CONFIGURATION
