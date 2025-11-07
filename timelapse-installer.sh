@@ -550,29 +550,36 @@ prompt_decrypt_password() {
         
         # Read password with asterisk feedback
         DECRYPT_PASSWORD=""
-        prompt="Enter decryption password: "
-        while IFS= read -p "$prompt" -r -s -n 1 char; do
-            if [[ $char == $'\0' ]]; then
+        echo -n "Enter decryption password: "
+        
+        while IFS= read -r -s -n 1 char; do
+            # Enter key (empty char)
+            if [[ -z "$char" ]]; then
+                echo  # Newline
                 break
             fi
-            if [[ $char == $'\177' ]]; then  # Backspace
+            
+            # Backspace or Delete
+            if [[ "$char" == $'\x7f' ]] || [[ "$char" == $'\x08' ]]; then
                 if [[ -n "$DECRYPT_PASSWORD" ]]; then
                     DECRYPT_PASSWORD="${DECRYPT_PASSWORD%?}"
-                    prompt=$'\b \b'
+                    echo -ne '\b \b'  # Erase the last asterisk
                 fi
             else
+                # Regular character
                 DECRYPT_PASSWORD+="$char"
-                prompt='*'
+                echo -n '*'
             fi
         done
-        echo  # Newline after password entry
         
         if [[ -z "$DECRYPT_PASSWORD" ]]; then
+            echo
             log_error "Password cannot be empty"
             exit 1
         fi
     fi
 }
+
 
 download_and_decrypt() {
     local url="$1"
