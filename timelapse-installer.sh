@@ -162,9 +162,8 @@ install_dependencies() {
     echo
     
     log_info "Updating package lists..."
-    apt-get update > /tmp/apt-update.log 2>&1 &
-    show_animated_progress $! "Updating package lists"
-    echo -e "\r  ${GREEN}✓${NC} Package lists updated                                        "
+    echo
+    apt-get update
     echo
     
     local packages=(
@@ -187,31 +186,36 @@ install_dependencies() {
     for package in "${packages[@]}"; do
         current=$((current + 1))
         
-        # Show overall progress
-        show_progress $current $total
-        echo -ne "  Installing packages..."
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo -e "${CYAN}[$current/$total]${NC} Installing: ${YELLOW}$package${NC}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo
         
         if dpkg -l 2>/dev/null | grep -q "^ii  $package "; then
-            echo -e "  ${GREEN}✓${NC} $package ${CYAN}(already installed)${NC}"
+            echo -e "  ${GREEN}✓${NC} $package is already installed"
+            echo
         else
-            # Install package with live progress indicator
-            apt-get install -y "$package" > /tmp/apt-install-$package.log 2>&1 &
-            local install_pid=$!
-            
-            show_animated_progress $install_pid "Installing $package"
-            
-            if wait $install_pid; then
-                echo -e "\r  ${GREEN}✓${NC} $package ${CYAN}(installed)${NC}                                        "
+            # Install with live output
+            if apt-get install -y "$package"; then
+                echo
+                echo -e "  ${GREEN}✓${NC} $package installed successfully"
+                echo
             else
-                echo -e "\r  ${RED}✗${NC} $package ${RED}(failed)${NC}                                        "
-                log_error "Failed to install $package. Check /tmp/apt-install-$package.log for details"
+                echo
+                echo -e "  ${RED}✗${NC} Failed to install $package"
+                log_error "Installation failed for $package"
+                read -p "Continue anyway? (y/n): " -n 1 -r
+                echo
+                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    exit 1
+                fi
             fi
         fi
     done
     
-    echo
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     log_success "All dependencies installed"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
 ########################################
