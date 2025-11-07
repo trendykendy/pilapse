@@ -255,15 +255,15 @@ EOF
     if command -v iwgetid &> /dev/null; then
         current_ssid=$(iwgetid -r 2>/dev/null || echo "")
         if [[ -n "$current_ssid" ]]; then
-            echo "  ${GREEN}✓${NC} Currently connected to WiFi: $current_ssid"
+            echo -e "  ${GREEN}✓${NC} Currently connected to WiFi: $current_ssid"
             ip addr show wlan0 2>/dev/null | grep "inet " | awk '{print "  IP Address: " $2}' || true
         else
             # Check if wired connection exists
             if ip addr show eth0 2>/dev/null | grep -q "state UP"; then
-                echo "  ${GREEN}✓${NC} Connected via Ethernet"
+                echo -e "  ${GREEN}✓${NC} Connected via Ethernet"
                 ip addr show eth0 | grep "inet " | awk '{print "  IP Address: " $2}'
             else
-                echo "  ${YELLOW}⚠${NC} Not currently connected to any network"
+                echo -e "  ${YELLOW}⚠${NC} Not currently connected to any network"
             fi
         fi
     fi
@@ -282,8 +282,20 @@ EOF
     log_info "when available (useful for multiple locations/job sites)"
     echo
     
-    read -p "Configure WiFi networks? (y/n): " -n 1 -r
+    # Make sure we can read input
+    if [[ ! -t 0 ]]; then
+        log_warning "No interactive terminal detected - skipping WiFi configuration"
+        log_info "Run 'sudo timelapse add-wifi' later to configure WiFi"
+        return 0
+    fi
+    
+    read -p "Configure WiFi networks? (y/n): " -n 1 -r || {
+        echo
+        log_warning "Failed to read input - skipping WiFi configuration"
+        return 0
+    }
     echo
+    
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "Skipping WiFi configuration"
         return 0
@@ -292,7 +304,10 @@ EOF
     # Add networks
     while true; do
         echo
-        read -rp "WiFi SSID (or press Enter to finish): " wifi_ssid
+        read -rp "WiFi SSID (or press Enter to finish): " wifi_ssid || {
+            log_warning "Failed to read input - stopping WiFi configuration"
+            break
+        }
         
         if [[ -z "$wifi_ssid" ]]; then
             break
@@ -301,17 +316,20 @@ EOF
         # Check if this SSID already exists
         if grep -q "ssid=\"$wifi_ssid\"" "$WPA_CONF" 2>/dev/null; then
             log_warning "Network '$wifi_ssid' is already configured"
-            read -p "Reconfigure it? (y/n): " -n 1 -r
+            read -p "Reconfigure it? (y/n): " -n 1 -r || continue
             echo
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
                 continue
             fi
             # Remove existing entry
-            # This is a bit tricky - we need to remove the entire network block
             sed -i "/network={/,/}/{ /ssid=\"$wifi_ssid\"/,/^}/d; }" "$WPA_CONF"
         fi
         
-        read -rsp "WiFi Password: " wifi_password
+        read -rsp "WiFi Password: " wifi_password || {
+            echo
+            log_warning "Failed to read password"
+            continue
+        }
         echo
         
         if [[ -z "$wifi_password" ]]; then
@@ -325,7 +343,7 @@ EOF
         echo -e "  ${GREEN}✓${NC} Added: $wifi_ssid"
         
         echo
-        read -p "Add another WiFi network? (y/n): " -n 1 -r
+        read -p "Add another WiFi network? (y/n): " -n 1 -r || break
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             break
@@ -354,10 +372,10 @@ EOF
         echo "Current WiFi status:"
         current_ssid=$(iwgetid -r 2>/dev/null || echo "")
         if [[ -n "$current_ssid" ]]; then
-            echo "  ${GREEN}✓${NC} Connected to: $current_ssid"
+            echo -e "  ${GREEN}✓${NC} Connected to: $current_ssid"
             ip addr show wlan0 2>/dev/null | grep "inet " | awk '{print "  IP Address: " $2}' || true
         else
-            echo "  ${YELLOW}⚠${NC} Not connected to WiFi right now"
+            echo -e "  ${YELLOW}⚠${NC} Not connected to WiFi right now"
             echo "  (Will connect automatically when in range of a configured network)"
         fi
     else
@@ -366,7 +384,9 @@ EOF
     fi
     
     echo
+    return 0
 }
+
 
 
 ########################################
