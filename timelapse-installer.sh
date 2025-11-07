@@ -45,61 +45,6 @@ log_error() {
 }
 
 ########################################
-# PROGRESS BAR FUNCTIONS
-########################################
-
-# Animated spinner with dots
-show_spinner() {
-    local pid=$1
-    local message=$2
-    local delay=0.1
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    
-    while ps -p $pid > /dev/null 2>&1; do
-        local temp=${spinstr#?}
-        printf "\r  ${CYAN}%s${NC} %s" "$spinstr" "$message"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-    done
-    
-    wait $pid
-    return $?
-}
-
-# Progress bar with percentage
-show_progress() {
-    local current=$1
-    local total=$2
-    local width=40
-    local percentage=$((current * 100 / total))
-    local completed=$((width * current / total))
-    local remaining=$((width - completed))
-    
-    printf "\r  ${CYAN}["
-    printf "%${completed}s" | tr ' ' '█'
-    printf "%${remaining}s" | tr ' ' '░'
-    printf "]${NC} %3d%%" $percentage
-}
-
-# Animated progress for long-running tasks
-show_animated_progress() {
-    local pid=$1
-    local message=$2
-    local dots=0
-    local max_dots=3
-    
-    while ps -p $pid > /dev/null 2>&1; do
-        local dot_str=$(printf "%${dots}s" | tr ' ' '.')
-        printf "\r  ${CYAN}▶${NC} %-50s${dot_str}   " "$message"
-        dots=$(( (dots + 1) % (max_dots + 1) ))
-        sleep 0.5
-    done
-    
-    wait $pid
-    return $?
-}
-
-########################################
 # SYSTEM CHECKS
 ########################################
 check_root() {
@@ -109,19 +54,28 @@ check_root() {
     fi
 }
 
-check_interactive() {
-    # Check if we have an interactive terminal
+fix_terminal() {
+    # If stdin is not a terminal (piped execution), try to reconnect to TTY
     if [[ ! -t 0 ]]; then
-        log_error "This script requires an interactive terminal"
-        log_error "Please run directly: sudo bash install.sh"
-        log_error "Do NOT pipe it: curl ... | sudo bash"
-        exit 1
-    fi
-    
-    # Try to ensure we have access to /dev/tty
-    if [[ ! -e /dev/tty ]]; then
-        log_error "/dev/tty not available - cannot get interactive input"
-        exit 1
+        if [[ -e /dev/tty ]]; then
+            log_warning "Script is piped - reconnecting to terminal for interactive prompts..."
+            exec < /dev/tty
+            
+            # Verify it worked
+            if [[ ! -t 0 ]]; then
+                log_error "Failed to reconnect to terminal"
+                log_error "Please download and run directly:"
+                log_error "  curl -fsSL https://raw.githubusercontent.com/trendykendy/pilapse/main/timelapse-installer.sh -o timelapse-installer.sh"
+                log_error "  sudo bash timelapse-installer.sh"
+                exit 1
+            fi
+        else
+            log_error "This script requires an interactive terminal"
+            log_error "Please download and run directly:"
+            log_error "  curl -fsSL https://raw.githubusercontent.com/trendykendy/pilapse/main/timelapse-installer.sh -o timelapse-installer.sh"
+            log_error "  sudo bash timelapse-installer.sh"
+            exit 1
+        fi
     fi
 }
 
@@ -151,7 +105,7 @@ check_requirements() {
         fi
     fi
     
-    # Check if running on Raspberry Pi
+    # Check if running on Raspberry Pi (fix null byte warning)
     if [[ -f /proc/device-tree/model ]]; then
         PI_MODEL=$(tr -d '\0' < /proc/device-tree/model)
         log_info "Detected: $PI_MODEL"
@@ -177,14 +131,14 @@ install_dependencies() {
     log_info "═══════════════════════════════════════════════════════"
     echo
     
-    log_info "Updating package lists..."
-    echo
-    apt-get update
-    echo
-    
     # Pre-configure msmtp to disable AppArmor prompt
     log_info "Pre-configuring package options..."
     echo "msmtp msmtp/apparmor boolean false" | debconf-set-selections
+    echo
+    
+    log_info "Updating package lists..."
+    echo
+    apt-get update
     echo
     
     local packages=(
@@ -217,9 +171,7 @@ install_dependencies() {
             echo
         else
             # Install with live output, non-interactive
-            DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
-            
-            if [[ $? -eq 0 ]]; then
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"; then
                 echo
                 echo -e "  ${GREEN}✓${NC} $package installed successfully"
                 echo
@@ -240,7 +192,6 @@ install_dependencies() {
     log_success "All dependencies installed"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
-
 
 ########################################
 # WIFI CONFIGURATION
@@ -299,13 +250,7 @@ EOF
     echo
     
     read -p "Configure WiFi networks? (y/n): " -n 1 -r
-    local reply_result=$?
     echo
-    
-    if [[ $reply_result -ne 0 ]]; then
-        log_error "Failed to read input - terminal may have disconnected"
-        return 1
-    fi
     
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "Skipping WiFi configuration"
@@ -316,11 +261,6 @@ EOF
     while true; do
         echo
         read -rp "WiFi SSID (or press Enter to finish): " wifi_ssid
-        
-        if [[ $? -ne 0 ]]; then
-            log_error "Failed to read input"
-            return 1
-        fi
         
         if [[ -z "$wifi_ssid" ]]; then
             break
@@ -334,7 +274,7 @@ EOF
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
                 continue
             fi
-            # Remove existing entry - remove the entire network block
+            # Remove existing entry
             awk '/network=\{/,/\}/ {if (/ssid="'"$wifi_ssid"'"/) {skip=1} if (skip && /\}/) {skip=0; next} if (!skip) print; next} 1' "$WPA_CONF" > "$WPA_CONF.tmp"
             mv "$WPA_CONF.tmp" "$WPA_CONF"
         fi
@@ -499,7 +439,6 @@ install_rpi_connect() {
     return 0
 }
 
-
 ########################################
 # DIRECTORY CREATION
 ########################################
@@ -520,14 +459,9 @@ create_directories() {
         "/root/.config/rclone"
     )
     
-    local total=${#dirs[@]}
-    local current=0
-    
     for dir in "${dirs[@]}"; do
-        current=$((current + 1))
-        mkdir -p "$dir" 2>&1 &
-        show_animated_progress $! "Creating directories"
-        echo -e "\r  ${GREEN}✓${NC} Created: $dir                                        "
+        mkdir -p "$dir"
+        echo -e "  ${GREEN}✓${NC} Created: $dir"
     done
     
     # Set ownership for user directories
@@ -606,6 +540,48 @@ download_and_decrypt() {
     fi
 }
 
+install_gcloud_json() {
+    log_info "Installing Google Cloud service account credentials..."
+    echo
+    
+    local json_dest="$USER_HOME/timelapsecamdriveauth-12192b48330a.json"
+    
+    # Prompt for password if not already set
+    prompt_decrypt_password
+    
+    # Download and decrypt from remote
+    if download_and_decrypt "$GCLOUD_JSON_URL" "$json_dest"; then
+        # Verify it's valid JSON
+        if jq empty "$json_dest" 2>/dev/null; then
+            chmod 644 "$json_dest"
+            chown admin:admin "$json_dest" 2>/dev/null || true
+            echo
+            log_success "Service account JSON installed"
+            
+            # Show service account email
+            local sa_email=$(jq -r '.client_email' "$json_dest" 2>/dev/null || echo "unknown")
+            log_info "Service account email: $sa_email"
+            echo
+            log_warning "Make sure this email has access to your Google Drive folder!"
+            echo
+            
+            echo "$json_dest"
+            return 0
+        else
+            log_error "Decrypted file is not valid JSON"
+            rm -f "$json_dest"
+            return 1
+        fi
+    else
+        log_error "Could not download/decrypt service account JSON"
+        log_error "Please check:"
+        log_error "  1. The file exists at: $GCLOUD_JSON_URL"
+        log_error "  2. The decryption password is correct"
+        log_error "  3. You have internet connectivity"
+        return 1
+    fi
+}
+
 configure_rclone() {
     echo
     log_info "═══════════════════════════════════════════════════════"
@@ -676,7 +652,7 @@ EOF
         log_warning "  3. Network connectivity issues"
         echo
         
-        local sa_email=$(jq -r '.client_email' "$json_path" 2>/dev/null || echo 'unknown')
+        local sa_email=$(jq -r '.client_email' "$json_dest" 2>/dev/null || echo 'unknown')
         log_info "Service account email: $sa_email"
         log_info "Make sure you've shared your Google Drive folder with this email!"
         echo
@@ -696,7 +672,84 @@ EOF
     return 0
 }
 
+install_msmtp_config() {
+    log_info "Installing email (msmtp) configuration..."
+    echo
+    
+    local msmtprc_dest="/root/.msmtprc"
+    
+    # Prompt for password if not already set
+    prompt_decrypt_password
+    
+    # Try to download and decrypt from remote
+    if download_and_decrypt "$MSMTP_CONFIG_URL" "$msmtprc_dest"; then
+        chmod 600 "$msmtprc_dest"
+        echo
+        log_success "msmtp configuration installed"
+        
+        # Show configured email
+        local from_email=$(grep "^from" "$msmtprc_dest" | awk '{print $2}')
+        log_info "Email configured: $from_email"
+        
+        return 0
+    else
+        log_warning "Could not download/decrypt msmtp config from remote"
+        return 1
+    fi
+}
 
+configure_email() {
+    echo
+    log_info "═══════════════════════════════════════════════════════"
+    log_info "  EMAIL CONFIGURATION"
+    log_info "═══════════════════════════════════════════════════════"
+    echo
+    
+    if [[ -f "/root/.msmtprc" ]]; then
+        log_warning "msmtp configuration already exists"
+        read -p "Reconfigure email? (y/n): " -n 1 -r || {
+            echo
+            log_success "Using existing msmtp configuration"
+            return 0
+        }
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_success "Using existing msmtp configuration"
+            return 0
+        fi
+    fi
+    
+    # Try to install from remote first
+    if install_msmtp_config; then
+        # Test the configuration
+        log_info "Testing email configuration..."
+        read -p "Send test email? (y/n): " -n 1 -r || {
+            echo
+            return 0
+        }
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            read -p "Test email recipient: " test_recipient || {
+                log_info "Skipping test email"
+                return 0
+            }
+            
+            if echo -e "Subject: Timelapse Installer Test\n\nThis is a test email from the timelapse installer.\n\nIf you received this, email is configured correctly." | msmtp "$test_recipient" 2>/dev/null; then
+                log_success "Test email sent successfully"
+                log_info "Check spam folder if not received"
+            else
+                log_warning "Test email may have failed"
+                log_info "Check /root/.msmtp.log for details"
+            fi
+        fi
+        return 0
+    else
+        log_error "Failed to install email configuration"
+        log_info "Skipping email configuration"
+        log_info "You can configure manually later"
+        return 0
+    fi
+}
 
 ########################################
 # SCRIPT INSTALLATION
@@ -708,30 +761,30 @@ download_timelapse_script() {
     log_info "═══════════════════════════════════════════════════════"
     echo
     
-    curl -fsSL "$TIMELAPSE_SCRIPT_URL" -o "$INSTALL_DIR/timelapse" 2>&1 &
-    show_animated_progress $! "Downloading timelapse script"
-    
-    if wait $!; then
+    if curl -fsSL "$TIMELAPSE_SCRIPT_URL" -o "$INSTALL_DIR/timelapse"; then
         chmod +x "$INSTALL_DIR/timelapse"
-        echo -e "\r  ${GREEN}✓${NC} Timelapse script installed                                        "
+        echo -e "  ${GREEN}✓${NC} Timelapse script installed"
         log_info "Location: $INSTALL_DIR/timelapse"
     else
-        echo -e "\r  ${RED}✗${NC} Failed to download timelapse script                                        "
+        echo -e "  ${RED}✗${NC} Failed to download timelapse script"
         log_info "You can manually place timelapse.sh at $INSTALL_DIR/timelapse"
-        read -p "Do you have the script locally? (y/n): " -n 1 -r
+        read -p "Do you have the script locally? (y/n): " -n 1 -r || {
+            echo
+            return 1
+        }
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            read -p "Enter path to timelapse.sh: " script_path
+            read -p "Enter path to timelapse.sh: " script_path || return 1
             if [[ -f "$script_path" ]]; then
                 cp "$script_path" "$INSTALL_DIR/timelapse"
                 chmod +x "$INSTALL_DIR/timelapse"
                 log_success "Script installed from local path"
             else
                 log_error "File not found: $script_path"
-                exit 1
+                return 1
             fi
         else
-            exit 1
+            return 1
         fi
     fi
 }
@@ -746,21 +799,22 @@ test_camera() {
     log_info "═══════════════════════════════════════════════════════"
     echo
     
-    read -p "Test camera connection? (y/n): " -n 1 -r
+    read -p "Test camera connection? (y/n): " -n 1 -r || {
+        echo
+        log_info "Skipping camera test"
+        return 0
+    }
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "Skipping camera test"
-        return
+        return 0
     fi
     
-    (timeout 10 gphoto2 --auto-detect 2>/dev/null | grep -q "usb:") &
-    show_animated_progress $! "Detecting camera"
-    
-    if wait $!; then
-        echo -e "\r  ${GREEN}✓${NC} Camera detected                                        "
+    if timeout 10 gphoto2 --auto-detect 2>/dev/null | grep -q "usb:"; then
+        echo -e "  ${GREEN}✓${NC} Camera detected"
         gphoto2 --auto-detect | grep "usb:"
     else
-        echo -e "\r  ${YELLOW}⚠${NC} No camera detected                                        "
+        echo -e "  ${YELLOW}⚠${NC} No camera detected"
         log_info "Make sure your camera is:"
         log_info "  - Connected via USB"
         log_info "  - Powered on"
@@ -877,7 +931,7 @@ show_summary() {
 main() {
     show_banner
     check_root
-    check_interactive  # Add this check
+    fix_terminal
     check_requirements
     
     echo
@@ -897,7 +951,6 @@ main() {
     
     show_summary
 }
-
 
 # Run main function
 main "$@"
