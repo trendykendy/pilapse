@@ -548,7 +548,12 @@ prompt_decrypt_password() {
         log_info "You need the decryption password to continue"
         echo
         
-        read -sp "Enter decryption password: " DECRYPT_PASSWORD
+        read -sp "Enter decryption password: " DECRYPT_PASSWORD || {
+            echo
+            log_error "Failed to read password input"
+            log_error "Make sure you're running this in an interactive terminal"
+            exit 1
+        }
         echo  # Newline after password entry
         
         if [[ -z "$DECRYPT_PASSWORD" ]]; then
@@ -557,8 +562,6 @@ prompt_decrypt_password() {
         fi
     fi
 }
-
-
 
 download_and_decrypt() {
     local url="$1"
@@ -577,8 +580,9 @@ download_and_decrypt() {
     fi
     
     # Check if file is actually encrypted
-    if ! file "$temp_encrypted" | grep -q "GPG"; then
+    if ! file "$temp_encrypted" 2>/dev/null | grep -q "GPG"; then
         log_error "Downloaded file is not GPG encrypted"
+        log_error "File type: $(file "$temp_encrypted")"
         rm -f "$temp_encrypted"
         return 1
     fi
@@ -586,55 +590,18 @@ download_and_decrypt() {
     # Decrypt file
     log_info "Decrypting file..."
     if echo "$DECRYPT_PASSWORD" | gpg --decrypt --batch --yes \
-        --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/dev/null; then
+        --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/tmp/gpg-error.log; then
         rm -f "$temp_encrypted"
         echo -e "  ${GREEN}✓${NC} Decrypted successfully"
         return 0
     else
-        echo -e "  ${RED}✗${NC} Decryption failed - incorrect password?"
-        rm -f "$temp_encrypted" "$output_file"
-        return 1
-    fi
-}
-
-install_gcloud_json() {
-    log_info "Installing Google Cloud service account credentials..."
-    echo
-    
-    local json_dest="$USER_HOME/timelapsecamdriveauth-12192b48330a.json"
-    
-    # Prompt for password if not already set
-    prompt_decrypt_password
-    
-    # Download and decrypt from remote
-    if download_and_decrypt "$GCLOUD_JSON_URL" "$json_dest"; then
-        # Verify it's valid JSON
-        if jq empty "$json_dest" 2>/dev/null; then
-            chmod 644 "$json_dest"
-            chown admin:admin "$json_dest" 2>/dev/null || true
-            echo
-            log_success "Service account JSON installed"
-            
-            # Show service account email
-            local sa_email=$(jq -r '.client_email' "$json_dest" 2>/dev/null || echo "unknown")
-            log_info "Service account email: $sa_email"
-            echo
-            log_warning "Make sure this email has access to your Google Drive folder!"
-            echo
-            
-            echo "$json_dest"
-            return 0
-        else
-            log_error "Decrypted file is not valid JSON"
-            rm -f "$json_dest"
-            return 1
-        fi
-    else
-        log_error "Could not download/decrypt service account JSON"
-        log_error "Please check:"
-        log_error "  1. The file exists at: $GCLOUD_JSON_URL"
-        log_error "  2. The decryption password is correct"
-        log_error "  3. You have internet connectivity"
+        echo -e "  ${RED}✗${NC} Decryption failed"
+        log_error "GPG error: $(cat /tmp/gpg-error.log 2>/dev/null || echo 'Unknown error')"
+        log_error "Possible causes:"
+        log_error "  - Incorrect password"
+        log_error "  - File is corrupted"
+        log_error "  - GPG key mismatch"
+        rm -f "$temp_encrypted" "$output_file" /tmp/gpg-error.log
         return 1
     fi
 }
@@ -648,11 +615,15 @@ configure_rclone() {
     
     if [[ -f "/root/.config/rclone/rclone.conf" ]]; then
         log_warning "rclone configuration already exists"
-        read -p "Reconfigure rclone? (y/n): " -n 1 -r
+        read -p "Reconfigure rclone? (y/n): " -n 1 -r || {
+            echo
+            log_info "Using existing rclone configuration"
+            return 0
+        }
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             # Test existing config
-            if rclone listremotes | grep -q "aperturetimelapsedrive"; then
+            if rclone listremotes 2>/dev/null | grep -q "aperturetimelapsedrive"; then
                 log_success "Using existing rclone configuration"
                 return 0
             fi
@@ -660,13 +631,19 @@ configure_rclone() {
     fi
     
     # Install JSON file (will auto-download and decrypt)
-    json_path=$(install_gcloud_json)
-    
-    if [[ -z "$json_path" ]] || [[ ! -f "$json_path" ]]; then
+    if ! json_path=$(install_gcloud_json); then
         log_error "Failed to install service account JSON"
+        echo
         log_info "Skipping rclone configuration"
         log_info "You can configure manually later with: sudo rclone config"
-        return 1
+        echo
+        return 0  # Don't fail the entire installation
+    fi
+    
+    if [[ -z "$json_path" ]] || [[ ! -f "$json_path" ]]; then
+        log_error "Service account JSON file not found at: $json_path"
+        log_info "Skipping rclone configuration"
+        return 0
     fi
     
     # Create rclone config automatically
@@ -683,6 +660,7 @@ EOF
     echo -e "  ${GREEN}✓${NC} rclone configuration created"
     
     # Test connection
+    echo
     log_info "Testing Google Drive connection..."
     if timeout 10 rclone lsd aperturetimelapsedrive: > /dev/null 2>&1; then
         echo -e "  ${GREEN}✓${NC} Google Drive connection successful"
@@ -697,19 +675,27 @@ EOF
         log_warning "  2. The Drive folder hasn't been shared with the service account"
         log_warning "  3. Network connectivity issues"
         echo
-        log_info "Service account email: $(jq -r '.client_email' "$json_path" 2>/dev/null || echo 'unknown')"
+        
+        local sa_email=$(jq -r '.client_email' "$json_path" 2>/dev/null || echo 'unknown')
+        log_info "Service account email: $sa_email"
         log_info "Make sure you've shared your Google Drive folder with this email!"
         echo
         
-        read -p "Continue anyway? (y/n): " -n 1 -r
+        read -p "Continue anyway? (y/n): " -n 1 -r || {
+            echo
+            log_info "Continuing installation..."
+            return 0
+        }
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            return 1
+            log_info "You can reconfigure later with: sudo rclone config"
+            return 0
         fi
     fi
     
     return 0
 }
+
 
 
 ########################################
