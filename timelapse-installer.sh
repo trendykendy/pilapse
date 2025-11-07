@@ -48,41 +48,55 @@ log_error() {
 # PROGRESS BAR FUNCTIONS
 ########################################
 
-# Simple spinner
+# Animated spinner with dots
 show_spinner() {
     local pid=$1
+    local message=$2
     local delay=0.1
-    local spinstr='|/-\'
+    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    
     while ps -p $pid > /dev/null 2>&1; do
         local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
+        printf "\r  ${CYAN}%s${NC} %s" "$spinstr" "$message"
         local spinstr=$temp${spinstr%"$temp"}
         sleep $delay
-        printf "\b\b\b\b\b\b"
     done
-    printf "    \b\b\b\b"
+    
+    wait $pid
+    return $?
 }
 
-# Progress bar
+# Progress bar with percentage
 show_progress() {
     local current=$1
     local total=$2
-    local width=50
+    local width=40
     local percentage=$((current * 100 / total))
     local completed=$((width * current / total))
     local remaining=$((width - completed))
     
-    printf "\r${CYAN}["
-    printf "%${completed}s" | tr ' ' '='
-    printf "%${remaining}s" | tr ' ' '-'
-    printf "]${NC} %3d%% (%d/%d)" $percentage $current $total
+    printf "\r  ${CYAN}["
+    printf "%${completed}s" | tr ' ' '█'
+    printf "%${remaining}s" | tr ' ' '░'
+    printf "]${NC} %3d%%" $percentage
 }
 
-# Complete progress bar
-complete_progress() {
-    local total=$1
-    show_progress $total $total
-    echo
+# Animated progress for long-running tasks
+show_animated_progress() {
+    local pid=$1
+    local message=$2
+    local dots=0
+    local max_dots=3
+    
+    while ps -p $pid > /dev/null 2>&1; do
+        local dot_str=$(printf "%${dots}s" | tr ' ' '.')
+        printf "\r  ${CYAN}▶${NC} %-50s${dot_str}   " "$message"
+        dots=$(( (dots + 1) % (max_dots + 1) ))
+        sleep 0.5
+    done
+    
+    wait $pid
+    return $?
 }
 
 ########################################
@@ -148,9 +162,9 @@ install_dependencies() {
     echo
     
     log_info "Updating package lists..."
-    apt-get update -qq &
-    show_spinner $!
-    log_success "Package lists updated"
+    apt-get update > /tmp/apt-update.log 2>&1 &
+    show_animated_progress $! "Updating package lists"
+    echo -e "\r  ${GREEN}✓${NC} Package lists updated                                        "
     echo
     
     local packages=(
@@ -173,23 +187,25 @@ install_dependencies() {
     for package in "${packages[@]}"; do
         current=$((current + 1))
         
-        if dpkg -l | grep -q "^ii  $package "; then
-            show_progress $current $total
-            echo -ne " ${GREEN}✓${NC} $package (already installed)"
-            echo
+        # Show overall progress
+        show_progress $current $total
+        echo -ne "  Installing packages..."
+        echo
+        
+        if dpkg -l 2>/dev/null | grep -q "^ii  $package "; then
+            echo -e "  ${GREEN}✓${NC} $package ${CYAN}(already installed)${NC}"
         else
-            show_progress $current $total
-            echo -ne " Installing $package..."
+            # Install package with live progress indicator
+            apt-get install -y "$package" > /tmp/apt-install-$package.log 2>&1 &
+            local install_pid=$!
             
-            # Install package silently
-            if apt-get install -y "$package" > /dev/null 2>&1; then
-                printf "\r"
-                show_progress $current $total
-                echo -e " ${GREEN}✓${NC} $package"
+            show_animated_progress $install_pid "Installing $package"
+            
+            if wait $install_pid; then
+                echo -e "\r  ${GREEN}✓${NC} $package ${CYAN}(installed)${NC}                                        "
             else
-                printf "\r"
-                show_progress $current $total
-                echo -e " ${RED}✗${NC} $package (failed)"
+                echo -e "\r  ${RED}✗${NC} $package ${RED}(failed)${NC}                                        "
+                log_error "Failed to install $package. Check /tmp/apt-install-$package.log for details"
             fi
         fi
     done
@@ -255,13 +271,10 @@ EOF"
         fi
         
         # Generate PSK using wpa_passphrase
-        echo -ne "Adding network: $wifi_ssid..."
+        wpa_passphrase "$wifi_ssid" "$wifi_password" >> "$WPA_CONF" 2>&1 &
+        show_animated_progress $! "Adding network: $wifi_ssid"
         
-        # Use wpa_passphrase to generate the encrypted PSK
-        wpa_passphrase "$wifi_ssid" "$wifi_password" | tee -a "$WPA_CONF" > /dev/null &
-        show_spinner $!
-        
-        echo -e "\r${GREEN}✓${NC} Added: $wifi_ssid                    "
+        echo -e "\r  ${GREEN}✓${NC} Added: $wifi_ssid                                        "
         echo
         
         read -p "Add another WiFi network? (y/n): " -n 1 -r
@@ -278,14 +291,15 @@ EOF"
     echo
     
     # Reconfigure WiFi
-    log_info "Applying WiFi configuration..."
-    wpa_cli -i wlan0 reconfigure > /dev/null 2>&1 || true
+    wpa_cli -i wlan0 reconfigure > /dev/null 2>&1 &
+    show_animated_progress $! "Applying WiFi configuration"
+    echo -e "\r  ${GREEN}✓${NC} WiFi configuration applied                                        "
     
-    log_success "WiFi configuration complete"
     echo
     
     # Show current connection status
     echo "Current WiFi status:"
+    sleep 2  # Give it a moment to connect
     if command -v iwgetid &> /dev/null; then
         current_ssid=$(iwgetid -r)
         if [[ -n "$current_ssid" ]]; then
@@ -334,32 +348,28 @@ install_rpi_connect() {
     fi
     
     # Install Raspberry Pi Connect
-    echo -ne "Installing rpi-connect package..."
-    if apt-get install -y rpi-connect > /dev/null 2>&1 &
-    then
-        show_spinner $!
-        echo -e "\r${GREEN}✓${NC} rpi-connect package installed                    "
+    apt-get install -y rpi-connect > /tmp/rpi-connect-install.log 2>&1 &
+    show_animated_progress $! "Installing rpi-connect package"
+    
+    if wait $!; then
+        echo -e "\r  ${GREEN}✓${NC} rpi-connect package installed                                        "
     else
-        echo -e "\r${RED}✗${NC} Failed to install rpi-connect                    "
+        echo -e "\r  ${RED}✗${NC} Failed to install rpi-connect                                        "
         log_info "You can install it manually later with: sudo apt install rpi-connect"
         return
     fi
     
     # Enable and start the service
-    echo -ne "Enabling Raspberry Pi Connect service..."
-    systemctl enable rpi-connect > /dev/null 2>&1
-    systemctl start rpi-connect > /dev/null 2>&1
-    sleep 1
-    echo -e "\r${GREEN}✓${NC} Raspberry Pi Connect service enabled                    "
+    systemctl enable rpi-connect > /dev/null 2>&1 &
+    systemctl start rpi-connect > /dev/null 2>&1 &
+    show_animated_progress $! "Enabling Raspberry Pi Connect service"
+    echo -e "\r  ${GREEN}✓${NC} Raspberry Pi Connect service enabled                                        "
     
     # Enable user lingering (so remote shell works when not logged in)
-    echo -ne "Enabling user lingering for remote shell access..."
     ACTUAL_USER="${SUDO_USER:-admin}"
-    if loginctl enable-linger "$ACTUAL_USER" 2>/dev/null; then
-        echo -e "\r${GREEN}✓${NC} User lingering enabled for $ACTUAL_USER                    "
-    else
-        echo -e "\r${YELLOW}⚠${NC} Failed to enable user lingering                    "
-    fi
+    loginctl enable-linger "$ACTUAL_USER" 2>/dev/null &
+    show_animated_progress $! "Enabling user lingering for remote shell"
+    echo -e "\r  ${GREEN}✓${NC} User lingering enabled for $ACTUAL_USER                                        "
     
     echo
     log_success "Raspberry Pi Connect installed"
@@ -419,10 +429,9 @@ create_directories() {
     
     for dir in "${dirs[@]}"; do
         current=$((current + 1))
-        mkdir -p "$dir"
-        show_progress $current $total
-        echo -ne " ${GREEN}✓${NC} $dir"
-        echo
+        mkdir -p "$dir" 2>&1 &
+        show_animated_progress $! "Creating directories"
+        echo -e "\r  ${GREEN}✓${NC} Created: $dir                                        "
     done
     
     # Set ownership for user directories
@@ -457,33 +466,35 @@ download_and_decrypt() {
     local output_file="$2"
     local temp_encrypted=$(mktemp)
     
-    echo -ne "Downloading encrypted file..."
-    
     # Download encrypted file
-    if ! curl -fsSL "$url" -o "$temp_encrypted" 2>/dev/null; then
-        echo -e "\r${RED}✗${NC} Failed to download                    "
+    curl -fsSL "$url" -o "$temp_encrypted" 2>&1 &
+    show_animated_progress $! "Downloading encrypted file"
+    
+    if ! wait $!; then
+        echo -e "\r  ${RED}✗${NC} Failed to download                                        "
         rm -f "$temp_encrypted"
         return 1
     fi
-    echo -e "\r${GREEN}✓${NC} Downloaded                    "
+    echo -e "\r  ${GREEN}✓${NC} Downloaded encrypted file                                        "
     
     # Check if file is actually encrypted
     if ! file "$temp_encrypted" | grep -q "GPG"; then
-        echo "${RED}✗${NC} File is not GPG encrypted"
+        echo "  ${RED}✗${NC} File is not GPG encrypted"
         rm -f "$temp_encrypted"
         return 1
     fi
     
-    echo -ne "Decrypting file..."
-    
     # Decrypt file
-    if echo "$DECRYPT_PASSWORD" | gpg --decrypt --batch --yes \
-        --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/dev/null; then
+    (echo "$DECRYPT_PASSWORD" | gpg --decrypt --batch --yes \
+        --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/dev/null) &
+    show_animated_progress $! "Decrypting file"
+    
+    if wait $!; then
         rm -f "$temp_encrypted"
-        echo -e "\r${GREEN}✓${NC} Decrypted successfully                    "
+        echo -e "\r  ${GREEN}✓${NC} Decrypted successfully                                        "
         return 0
     else
-        echo -e "\r${RED}✗${NC} Decryption failed - incorrect password?                    "
+        echo -e "\r  ${RED}✗${NC} Decryption failed - incorrect password?                                        "
         rm -f "$temp_encrypted" "$output_file"
         return 1
     fi
@@ -574,8 +585,6 @@ configure_rclone() {
     fi
     
     # Create rclone config automatically
-    echo -ne "Creating rclone configuration..."
-    
     cat > /root/.config/rclone/rclone.conf << EOF
 [aperturetimelapsedrive]
 type = drive
@@ -585,15 +594,17 @@ team_drive =
 EOF
     
     chmod 600 /root/.config/rclone/rclone.conf
-    echo -e "\r${GREEN}✓${NC} rclone configuration created                    "
+    echo "  ${GREEN}✓${NC} rclone configuration created"
     
     # Test connection
-    echo -ne "Testing Google Drive connection..."
-    if timeout 10 rclone lsd aperturetimelapsedrive: > /dev/null 2>&1; then
-        echo -e "\r${GREEN}✓${NC} Google Drive connection successful                    "
+    (timeout 10 rclone lsd aperturetimelapsedrive: > /dev/null 2>&1) &
+    show_animated_progress $! "Testing Google Drive connection"
+    
+    if wait $!; then
+        echo -e "\r  ${GREEN}✓${NC} Google Drive connection successful                                        "
         log_info "Remote name: aperturetimelapsedrive"
     else
-        echo -e "\r${RED}✗${NC} Google Drive connection failed                    "
+        echo -e "\r  ${RED}✗${NC} Google Drive connection failed                                        "
         log_warning "You may need to:"
         log_warning "  1. Verify the service account JSON is correct"
         log_warning "  2. Share your Drive folder with the service account email"
@@ -670,12 +681,15 @@ configure_email() {
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             read -p "Test email recipient: " test_recipient
-            echo -ne "Sending test email..."
-            if echo -e "Subject: Timelapse Installer Test\n\nThis is a test email from the timelapse installer.\n\nIf you received this, email is configured correctly." | msmtp "$test_recipient" 2>/dev/null; then
-                echo -e "\r${GREEN}✓${NC} Test email sent successfully                    "
+            
+            (echo -e "Subject: Timelapse Installer Test\n\nThis is a test email from the timelapse installer.\n\nIf you received this, email is configured correctly." | msmtp "$test_recipient" 2>/dev/null) &
+            show_animated_progress $! "Sending test email"
+            
+            if wait $!; then
+                echo -e "\r  ${GREEN}✓${NC} Test email sent successfully                                        "
                 log_info "Check spam folder if not received"
             else
-                echo -e "\r${YELLOW}⚠${NC} Test email may have failed                    "
+                echo -e "\r  ${YELLOW}⚠${NC} Test email may have failed                                        "
                 log_info "Check /root/.msmtp.log for details"
             fi
         fi
@@ -726,12 +740,15 @@ EOF
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         read -p "Test email recipient: " test_recipient
-        echo -ne "Sending test email..."
-        if echo -e "Subject: Timelapse Test\n\nThis is a test email from the timelapse system." | msmtp "$test_recipient" 2>/dev/null; then
-            echo -e "\r${GREEN}✓${NC} Test email sent successfully                    "
+        
+        (echo -e "Subject: Timelapse Test\n\nThis is a test email from the timelapse system." | msmtp "$test_recipient" 2>/dev/null) &
+        show_animated_progress $! "Sending test email"
+        
+        if wait $!; then
+            echo -e "\r  ${GREEN}✓${NC} Test email sent successfully                                        "
             log_info "Check spam folder if not received"
         else
-            echo -e "\r${RED}✗${NC} Test email failed                    "
+            echo -e "\r  ${RED}✗${NC} Test email failed                                        "
             log_info "Check /root/.msmtp.log for details"
         fi
     fi
@@ -747,14 +764,15 @@ download_timelapse_script() {
     log_info "═══════════════════════════════════════════════════════"
     echo
     
-    echo -ne "Downloading timelapse script..."
+    curl -fsSL "$TIMELAPSE_SCRIPT_URL" -o "$INSTALL_DIR/timelapse" 2>&1 &
+    show_animated_progress $! "Downloading timelapse script"
     
-    if curl -fsSL "$TIMELAPSE_SCRIPT_URL" -o "$INSTALL_DIR/timelapse" 2>/dev/null; then
+    if wait $!; then
         chmod +x "$INSTALL_DIR/timelapse"
-        echo -e "\r${GREEN}✓${NC} Timelapse script installed                    "
+        echo -e "\r  ${GREEN}✓${NC} Timelapse script installed                                        "
         log_info "Location: $INSTALL_DIR/timelapse"
     else
-        echo -e "\r${RED}✗${NC} Failed to download timelapse script                    "
+        echo -e "\r  ${RED}✗${NC} Failed to download timelapse script                                        "
         log_info "You can manually place timelapse.sh at $INSTALL_DIR/timelapse"
         read -p "Do you have the script locally? (y/n): " -n 1 -r
         echo
@@ -791,12 +809,14 @@ test_camera() {
         return
     fi
     
-    echo -ne "Detecting camera..."
-    if timeout 10 gphoto2 --auto-detect 2>/dev/null | grep -q "usb:"; then
-        echo -e "\r${GREEN}✓${NC} Camera detected                    "
+    (timeout 10 gphoto2 --auto-detect 2>/dev/null | grep -q "usb:") &
+    show_animated_progress $! "Detecting camera"
+    
+    if wait $!; then
+        echo -e "\r  ${GREEN}✓${NC} Camera detected                                        "
         gphoto2 --auto-detect | grep "usb:"
     else
-        echo -e "\r${YELLOW}⚠${NC} No camera detected                    "
+        echo -e "\r  ${YELLOW}⚠${NC} No camera detected                                        "
         log_info "Make sure your camera is:"
         log_info "  - Connected via USB"
         log_info "  - Powered on"
