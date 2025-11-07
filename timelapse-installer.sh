@@ -109,6 +109,22 @@ check_root() {
     fi
 }
 
+check_interactive() {
+    # Check if we have an interactive terminal
+    if [[ ! -t 0 ]]; then
+        log_error "This script requires an interactive terminal"
+        log_error "Please run directly: sudo bash install.sh"
+        log_error "Do NOT pipe it: curl ... | sudo bash"
+        exit 1
+    fi
+    
+    # Try to ensure we have access to /dev/tty
+    if [[ ! -e /dev/tty ]]; then
+        log_error "/dev/tty not available - cannot get interactive input"
+        exit 1
+    fi
+}
+
 show_banner() {
     clear
     cat << "EOF"
@@ -282,19 +298,14 @@ EOF
     log_info "when available (useful for multiple locations/job sites)"
     echo
     
-    # Make sure we can read input
-    if [[ ! -t 0 ]]; then
-        log_warning "No interactive terminal detected - skipping WiFi configuration"
-        log_info "Run 'sudo timelapse add-wifi' later to configure WiFi"
-        return 0
-    fi
-    
-    read -p "Configure WiFi networks? (y/n): " -n 1 -r || {
-        echo
-        log_warning "Failed to read input - skipping WiFi configuration"
-        return 0
-    }
+    read -p "Configure WiFi networks? (y/n): " -n 1 -r
+    local reply_result=$?
     echo
+    
+    if [[ $reply_result -ne 0 ]]; then
+        log_error "Failed to read input - terminal may have disconnected"
+        return 1
+    fi
     
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "Skipping WiFi configuration"
@@ -304,10 +315,12 @@ EOF
     # Add networks
     while true; do
         echo
-        read -rp "WiFi SSID (or press Enter to finish): " wifi_ssid || {
-            log_warning "Failed to read input - stopping WiFi configuration"
-            break
-        }
+        read -rp "WiFi SSID (or press Enter to finish): " wifi_ssid
+        
+        if [[ $? -ne 0 ]]; then
+            log_error "Failed to read input"
+            return 1
+        fi
         
         if [[ -z "$wifi_ssid" ]]; then
             break
@@ -316,20 +329,17 @@ EOF
         # Check if this SSID already exists
         if grep -q "ssid=\"$wifi_ssid\"" "$WPA_CONF" 2>/dev/null; then
             log_warning "Network '$wifi_ssid' is already configured"
-            read -p "Reconfigure it? (y/n): " -n 1 -r || continue
+            read -p "Reconfigure it? (y/n): " -n 1 -r
             echo
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
                 continue
             fi
-            # Remove existing entry
-            sed -i "/network={/,/}/{ /ssid=\"$wifi_ssid\"/,/^}/d; }" "$WPA_CONF"
+            # Remove existing entry - remove the entire network block
+            awk '/network=\{/,/\}/ {if (/ssid="'"$wifi_ssid"'"/) {skip=1} if (skip && /\}/) {skip=0; next} if (!skip) print; next} 1' "$WPA_CONF" > "$WPA_CONF.tmp"
+            mv "$WPA_CONF.tmp" "$WPA_CONF"
         fi
         
-        read -rsp "WiFi Password: " wifi_password || {
-            echo
-            log_warning "Failed to read password"
-            continue
-        }
+        read -rsp "WiFi Password: " wifi_password
         echo
         
         if [[ -z "$wifi_password" ]]; then
@@ -343,7 +353,7 @@ EOF
         echo -e "  ${GREEN}✓${NC} Added: $wifi_ssid"
         
         echo
-        read -p "Add another WiFi network? (y/n): " -n 1 -r || break
+        read -p "Add another WiFi network? (y/n): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             break
@@ -386,8 +396,6 @@ EOF
     echo
     return 0
 }
-
-
 
 ########################################
 # RASPBERRY PI CONNECT
@@ -1009,6 +1017,7 @@ show_summary() {
 main() {
     show_banner
     check_root
+    check_interactive  # Add this check
     check_requirements
     
     echo
@@ -1028,6 +1037,7 @@ main() {
     
     show_summary
 }
+
 
 # Run main function
 main "$@"
