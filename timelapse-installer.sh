@@ -5,12 +5,12 @@ set -euo pipefail
 # This script handles system-level setup (run once per Pi)
 
 VERSION="1.0.0"
-REPO_URL="https://raw.githubusercontent.com/yourusername/timelapse-camera/main"
+REPO_URL="https://raw.githubusercontent.com/trendykendy/pilapse/main"
 INSTALL_DIR="/usr/local/bin"
 USER_HOME="/home/admin"
 
 # Remote config file URLs (encrypted versions)
-GCLOUD_JSON_URL="${REPO_URL}/config/service-account.json.gpg"
+GCLOUD_JSON_URL="${REPO_URL}/config/timelapsecamdriveauth-12192b48330a.json.gpg"
 MSMTP_CONFIG_URL="${REPO_URL}/config/msmtprc.gpg"
 TIMELAPSE_SCRIPT_URL="${REPO_URL}/timelapse.sh"
 
@@ -22,6 +22,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 ########################################
@@ -41,6 +42,47 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+########################################
+# PROGRESS BAR FUNCTIONS
+########################################
+
+# Simple spinner
+show_spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    while ps -p $pid > /dev/null 2>&1; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+    done
+    printf "    \b\b\b\b"
+}
+
+# Progress bar
+show_progress() {
+    local current=$1
+    local total=$2
+    local width=50
+    local percentage=$((current * 100 / total))
+    local completed=$((width * current / total))
+    local remaining=$((width - completed))
+    
+    printf "\r${CYAN}["
+    printf "%${completed}s" | tr ' ' '='
+    printf "%${remaining}s" | tr ' ' '-'
+    printf "]${NC} %3d%% (%d/%d)" $percentage $current $total
+}
+
+# Complete progress bar
+complete_progress() {
+    local total=$1
+    show_progress $total $total
+    echo
 }
 
 ########################################
@@ -99,9 +141,17 @@ check_requirements() {
 # DEPENDENCY INSTALLATION
 ########################################
 install_dependencies() {
-    log_info "Installing required packages..."
+    echo
+    log_info "═══════════════════════════════════════════════════════"
+    log_info "  INSTALLING DEPENDENCIES"
+    log_info "═══════════════════════════════════════════════════════"
+    echo
     
-    apt-get update -qq
+    log_info "Updating package lists..."
+    apt-get update -qq &
+    show_spinner $!
+    log_success "Package lists updated"
+    echo
     
     local packages=(
         "gphoto2"
@@ -114,15 +164,37 @@ install_dependencies() {
         "bc"
     )
     
+    local total=${#packages[@]}
+    local current=0
+    
+    log_info "Installing ${total} packages..."
+    echo
+    
     for package in "${packages[@]}"; do
+        current=$((current + 1))
+        
         if dpkg -l | grep -q "^ii  $package "; then
-            log_info "$package already installed"
+            show_progress $current $total
+            echo -ne " ${GREEN}✓${NC} $package (already installed)"
+            echo
         else
-            log_info "Installing $package..."
-            apt-get install -y "$package" > /dev/null 2>&1
+            show_progress $current $total
+            echo -ne " Installing $package..."
+            
+            # Install package silently
+            if apt-get install -y "$package" > /dev/null 2>&1; then
+                printf "\r"
+                show_progress $current $total
+                echo -e " ${GREEN}✓${NC} $package"
+            else
+                printf "\r"
+                show_progress $current $total
+                echo -e " ${RED}✗${NC} $package (failed)"
+            fi
         fi
     done
     
+    echo
     log_success "All dependencies installed"
 }
 
@@ -183,12 +255,13 @@ EOF"
         fi
         
         # Generate PSK using wpa_passphrase
-        log_info "Adding network: $wifi_ssid"
+        echo -ne "Adding network: $wifi_ssid..."
         
         # Use wpa_passphrase to generate the encrypted PSK
-        wpa_passphrase "$wifi_ssid" "$wifi_password" | tee -a "$WPA_CONF" > /dev/null
+        wpa_passphrase "$wifi_ssid" "$wifi_password" | tee -a "$WPA_CONF" > /dev/null &
+        show_spinner $!
         
-        log_success "Added: $wifi_ssid"
+        echo -e "\r${GREEN}✓${NC} Added: $wifi_ssid                    "
         echo
         
         read -p "Add another WiFi network? (y/n): " -n 1 -r
@@ -216,10 +289,10 @@ EOF"
     if command -v iwgetid &> /dev/null; then
         current_ssid=$(iwgetid -r)
         if [[ -n "$current_ssid" ]]; then
-            echo "  Connected to: $current_ssid"
+            echo "  ${GREEN}✓${NC} Connected to: $current_ssid"
             ip addr show wlan0 | grep "inet " | awk '{print "  IP Address: " $2}'
         else
-            echo "  Not connected yet"
+            echo "  ${YELLOW}⚠${NC} Not connected yet"
             echo "  The Pi will connect to one of the configured networks shortly"
         fi
     fi
@@ -261,35 +334,41 @@ install_rpi_connect() {
     fi
     
     # Install Raspberry Pi Connect
-    log_info "Installing rpi-connect package..."
-    if apt-get install -y rpi-connect > /dev/null 2>&1; then
-        log_success "Raspberry Pi Connect installed successfully"
+    echo -ne "Installing rpi-connect package..."
+    if apt-get install -y rpi-connect > /dev/null 2>&1 &
+    then
+        show_spinner $!
+        echo -e "\r${GREEN}✓${NC} rpi-connect package installed                    "
     else
-        log_error "Failed to install Raspberry Pi Connect"
+        echo -e "\r${RED}✗${NC} Failed to install rpi-connect                    "
         log_info "You can install it manually later with: sudo apt install rpi-connect"
         return
     fi
     
     # Enable and start the service
-    log_info "Enabling Raspberry Pi Connect service..."
+    echo -ne "Enabling Raspberry Pi Connect service..."
     systemctl enable rpi-connect > /dev/null 2>&1
     systemctl start rpi-connect > /dev/null 2>&1
+    sleep 1
+    echo -e "\r${GREEN}✓${NC} Raspberry Pi Connect service enabled                    "
     
     # Enable user lingering (so remote shell works when not logged in)
-    log_info "Enabling user lingering for remote shell access..."
+    echo -ne "Enabling user lingering for remote shell access..."
     ACTUAL_USER="${SUDO_USER:-admin}"
     if loginctl enable-linger "$ACTUAL_USER" 2>/dev/null; then
-        log_success "User lingering enabled for $ACTUAL_USER"
-        log_info "Remote shell will work even when not logged in"
+        echo -e "\r${GREEN}✓${NC} User lingering enabled for $ACTUAL_USER                    "
     else
-        log_warning "Failed to enable user lingering"
+        echo -e "\r${YELLOW}⚠${NC} Failed to enable user lingering                    "
     fi
+    
+    echo
+    log_success "Raspberry Pi Connect installed"
     
     # Check service status
     if systemctl is-active --quiet rpi-connect; then
-        log_success "Raspberry Pi Connect service is running"
+        echo "  ${GREEN}✓${NC} Service is running"
     else
-        log_warning "Raspberry Pi Connect service failed to start"
+        echo "  ${YELLOW}⚠${NC} Service failed to start"
     fi
     
     echo
@@ -319,7 +398,11 @@ install_rpi_connect() {
 # DIRECTORY CREATION
 ########################################
 create_directories() {
-    log_info "Creating directory structure..."
+    echo
+    log_info "═══════════════════════════════════════════════════════"
+    log_info "  CREATING DIRECTORY STRUCTURE"
+    log_info "═══════════════════════════════════════════════════════"
+    echo
     
     local dirs=(
         "$USER_HOME/photos"
@@ -331,14 +414,22 @@ create_directories() {
         "/root/.config/rclone"
     )
     
+    local total=${#dirs[@]}
+    local current=0
+    
     for dir in "${dirs[@]}"; do
+        current=$((current + 1))
         mkdir -p "$dir"
+        show_progress $current $total
+        echo -ne " ${GREEN}✓${NC} $dir"
+        echo
     done
     
     # Set ownership for user directories
     chown -R admin:admin "$USER_HOME/photos" "$USER_HOME/backups" \
-        "$USER_HOME/thumbnails" "$USER_HOME/archive" "$USER_HOME/logs"
+        "$USER_HOME/thumbnails" "$USER_HOME/archive" "$USER_HOME/logs" 2>/dev/null || true
     
+    echo
     log_success "Directory structure created"
 }
 
@@ -366,32 +457,33 @@ download_and_decrypt() {
     local output_file="$2"
     local temp_encrypted=$(mktemp)
     
-    log_info "Downloading encrypted file..."
+    echo -ne "Downloading encrypted file..."
     
     # Download encrypted file
     if ! curl -fsSL "$url" -o "$temp_encrypted" 2>/dev/null; then
-        log_error "Failed to download from: $url"
+        echo -e "\r${RED}✗${NC} Failed to download                    "
         rm -f "$temp_encrypted"
         return 1
     fi
+    echo -e "\r${GREEN}✓${NC} Downloaded                    "
     
     # Check if file is actually encrypted
     if ! file "$temp_encrypted" | grep -q "GPG"; then
-        log_error "Downloaded file is not GPG encrypted"
+        echo "${RED}✗${NC} File is not GPG encrypted"
         rm -f "$temp_encrypted"
         return 1
     fi
     
-    log_info "Decrypting file..."
+    echo -ne "Decrypting file..."
     
     # Decrypt file
     if echo "$DECRYPT_PASSWORD" | gpg --decrypt --batch --yes \
         --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/dev/null; then
         rm -f "$temp_encrypted"
-        log_success "File decrypted successfully"
+        echo -e "\r${GREEN}✓${NC} Decrypted successfully                    "
         return 0
     else
-        log_error "Decryption failed - incorrect password?"
+        echo -e "\r${RED}✗${NC} Decryption failed - incorrect password?                    "
         rm -f "$temp_encrypted" "$output_file"
         return 1
     fi
@@ -399,8 +491,9 @@ download_and_decrypt() {
 
 install_gcloud_json() {
     log_info "Installing Google Cloud service account credentials..."
+    echo
     
-    local json_dest="$USER_HOME/service-account.json"
+    local json_dest="$USER_HOME/timelapsecamdriveauth-12192b48330a.json"
     
     # Prompt for password if not already set
     prompt_decrypt_password
@@ -410,6 +503,7 @@ install_gcloud_json() {
         # Verify it's valid JSON
         if jq empty "$json_dest" 2>/dev/null; then
             chmod 644 "$json_dest"
+            echo
             log_success "Service account JSON installed"
             
             # Show service account email
@@ -480,7 +574,7 @@ configure_rclone() {
     fi
     
     # Create rclone config automatically
-    log_info "Creating rclone configuration..."
+    echo -ne "Creating rclone configuration..."
     
     cat > /root/.config/rclone/rclone.conf << EOF
 [aperturetimelapsedrive]
@@ -491,14 +585,15 @@ team_drive =
 EOF
     
     chmod 600 /root/.config/rclone/rclone.conf
+    echo -e "\r${GREEN}✓${NC} rclone configuration created                    "
     
     # Test connection
-    log_info "Testing Google Drive connection..."
+    echo -ne "Testing Google Drive connection..."
     if timeout 10 rclone lsd aperturetimelapsedrive: > /dev/null 2>&1; then
-        log_success "Google Drive connection successful"
+        echo -e "\r${GREEN}✓${NC} Google Drive connection successful                    "
         log_info "Remote name: aperturetimelapsedrive"
     else
-        log_error "Google Drive connection failed"
+        echo -e "\r${RED}✗${NC} Google Drive connection failed                    "
         log_warning "You may need to:"
         log_warning "  1. Verify the service account JSON is correct"
         log_warning "  2. Share your Drive folder with the service account email"
@@ -513,6 +608,7 @@ EOF
 
 install_msmtp_config() {
     log_info "Installing email (msmtp) configuration..."
+    echo
     
     local msmtprc_dest="/root/.msmtprc"
     
@@ -522,6 +618,7 @@ install_msmtp_config() {
     # Try to download and decrypt from remote
     if download_and_decrypt "$MSMTP_CONFIG_URL" "$msmtprc_dest"; then
         chmod 600 "$msmtprc_dest"
+        echo
         log_success "msmtp configuration installed"
         
         # Show configured email
@@ -573,11 +670,12 @@ configure_email() {
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             read -p "Test email recipient: " test_recipient
+            echo -ne "Sending test email..."
             if echo -e "Subject: Timelapse Installer Test\n\nThis is a test email from the timelapse installer.\n\nIf you received this, email is configured correctly." | msmtp "$test_recipient" 2>/dev/null; then
-                log_success "Test email sent successfully"
+                echo -e "\r${GREEN}✓${NC} Test email sent successfully                    "
                 log_info "Check spam folder if not received"
             else
-                log_warning "Test email may have failed"
+                echo -e "\r${YELLOW}⚠${NC} Test email may have failed                    "
                 log_info "Check /root/.msmtp.log for details"
             fi
         fi
@@ -628,12 +726,12 @@ EOF
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         read -p "Test email recipient: " test_recipient
-        echo -e "Subject: Timelapse Test\n\nThis is a test email from the timelapse system." | msmtp "$test_recipient"
-        if [[ $? -eq 0 ]]; then
-            log_success "Test email sent successfully"
+        echo -ne "Sending test email..."
+        if echo -e "Subject: Timelapse Test\n\nThis is a test email from the timelapse system." | msmtp "$test_recipient" 2>/dev/null; then
+            echo -e "\r${GREEN}✓${NC} Test email sent successfully                    "
             log_info "Check spam folder if not received"
         else
-            log_error "Test email failed"
+            echo -e "\r${RED}✗${NC} Test email failed                    "
             log_info "Check /root/.msmtp.log for details"
         fi
     fi
@@ -649,13 +747,14 @@ download_timelapse_script() {
     log_info "═══════════════════════════════════════════════════════"
     echo
     
-    log_info "Downloading timelapse script..."
+    echo -ne "Downloading timelapse script..."
     
-    if curl -fsSL "$TIMELAPSE_SCRIPT_URL" -o "$INSTALL_DIR/timelapse"; then
+    if curl -fsSL "$TIMELAPSE_SCRIPT_URL" -o "$INSTALL_DIR/timelapse" 2>/dev/null; then
         chmod +x "$INSTALL_DIR/timelapse"
-        log_success "Timelapse script installed to $INSTALL_DIR/timelapse"
+        echo -e "\r${GREEN}✓${NC} Timelapse script installed                    "
+        log_info "Location: $INSTALL_DIR/timelapse"
     else
-        log_error "Failed to download timelapse script"
+        echo -e "\r${RED}✗${NC} Failed to download timelapse script                    "
         log_info "You can manually place timelapse.sh at $INSTALL_DIR/timelapse"
         read -p "Do you have the script locally? (y/n): " -n 1 -r
         echo
@@ -692,12 +791,12 @@ test_camera() {
         return
     fi
     
-    log_info "Detecting camera..."
+    echo -ne "Detecting camera..."
     if timeout 10 gphoto2 --auto-detect 2>/dev/null | grep -q "usb:"; then
-        log_success "Camera detected:"
+        echo -e "\r${GREEN}✓${NC} Camera detected                    "
         gphoto2 --auto-detect | grep "usb:"
     else
-        log_warning "No camera detected"
+        echo -e "\r${YELLOW}⚠${NC} No camera detected                    "
         log_info "Make sure your camera is:"
         log_info "  - Connected via USB"
         log_info "  - Powered on"
@@ -709,6 +808,7 @@ test_camera() {
 # UNINSTALL SCRIPT
 ########################################
 create_uninstall_script() {
+    echo
     log_info "Creating uninstall script..."
     
     cat > "$INSTALL_DIR/timelapse-uninstall" << 'EOF'
@@ -766,29 +866,29 @@ show_summary() {
     if command -v rpi-connect &> /dev/null; then
         echo "Remote Access:"
         if systemctl is-active --quiet rpi-connect; then
-            echo "  ✅ Raspberry Pi Connect is running"
+            echo "  ${GREEN}✓${NC} Raspberry Pi Connect is running"
             echo "  🌐 Access at: https://connect.raspberrypi.com"
             
             # Check lingering
             ACTUAL_USER="${SUDO_USER:-admin}"
             if loginctl show-user "$ACTUAL_USER" 2>/dev/null | grep -q "Linger=yes"; then
-                echo "  ✅ Remote shell enabled (works when logged out)"
+                echo "  ${GREEN}✓${NC} Remote shell enabled (works when logged out)"
             fi
         fi
         echo
     fi
     
     echo "What was installed:"
-    echo "  ✅ System dependencies (gphoto2, rclone, msmtp, etc.)"
-    echo "  ✅ WiFi networks configured"
-    echo "  ✅ Raspberry Pi Connect (remote access)"
-    echo "  ✅ Google Drive connection (rclone)"
-    echo "  ✅ Email configuration (msmtp)"
-    echo "  ✅ Timelapse script (/usr/local/bin/timelapse)"
-    echo "  ✅ Directory structure"
+    echo "  ${GREEN}✓${NC} System dependencies (gphoto2, rclone, msmtp, etc.)"
+    echo "  ${GREEN}✓${NC} WiFi networks configured"
+    echo "  ${GREEN}✓${NC} Raspberry Pi Connect (remote access)"
+    echo "  ${GREEN}✓${NC} Google Drive connection (rclone)"
+    echo "  ${GREEN}✓${NC} Email configuration (msmtp)"
+    echo "  ${GREEN}✓${NC} Timelapse script (/usr/local/bin/timelapse)"
+    echo "  ${GREEN}✓${NC} Directory structure"
     echo
-    echo "NEXT STEP - Configure your project:"
-    echo "  sudo timelapse setup"
+    echo "${CYAN}NEXT STEP - Configure your project:${NC}"
+    echo "  ${YELLOW}sudo timelapse setup${NC}"
     echo
     echo "This will configure:"
     echo "  - USB backup drive"
