@@ -1057,9 +1057,17 @@ main() {
     log_info "Starting system installation..."
     echo
     
+    # Check for test mode flag
+    if [[ "${1:-}" == "--test-wifi" ]]; then
+        log_warning "TEST MODE: Skipping to WiFi configuration only"
+        echo
+        configure_wifi
+        exit 0
+    fi
+    
     # System-level installation steps
     install_dependencies
-    configure_wifi              # Now uses NetworkManager - much simpler!
+    configure_wifi
     install_rpi_connect
     create_directories
     configure_rclone
@@ -1070,6 +1078,10 @@ main() {
     
     show_summary
 }
+
+# Run main function
+main "$@"
+
 
 
 
