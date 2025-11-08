@@ -109,66 +109,86 @@ EOF
   echo
 
   # 
-  # USB-drive detection & selection
-  # 
-  if [[ -z "$USB_BACKUP_LABEL" ]]; then
-    echo "USB BACKUP DRIVE"
-    echo "────────────────────────────────────────────────────────"
-    echo
-    while :; do
-      # Use lsblk with pairs output for easier parsing
-      mapfile -t devices < <(
-        lsblk -ln -o NAME,LABEL -P \
-          | grep 'NAME="sd[a-z][0-9]\+"' \
-          | grep -v 'LABEL=""' \
-          | while IFS= read -r line; do
-              eval "$line"
-              echo "/dev/$NAME:$LABEL"
-            done
-      )
-
-      if (( ${#devices[@]} > 0 )); then
-        echo "Detected USB drives:"
-        for i in "${!devices[@]}"; do
-          dev="${devices[i]%%:*}"
-          lbl="${devices[i]#*:}"
-          printf "  %2d) %-12s (label=\"%s\")\n" $((i+1)) "$dev" "$lbl"
-        done
-        echo
-
-        read -rp "Select a drive [1-${#devices[@]}]: " choice
-        if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && (( choice <= ${#devices[@]} )); then
-          USB_BACKUP_LABEL="${devices[choice-1]#*:}"
-          echo "Using label: $USB_BACKUP_LABEL"
-          break
-        else
-          echo "Invalid choice." >&2
-        fi
-
-      else
-        echo "No labeled USB drives found."
-        read -rp "[R]etry, [M]anual entry, or [C]ancel USB setup? " ans
-        case "${ans^^}" in
-          R)  continue ;;
-          M)  read -rp "Enter USB label manually: " USB_BACKUP_LABEL; break ;;
-          C)  echo "Skipping USB setup."; break ;;
-          *)  echo "Please choose R, M, or C." ;;
-        esac
-      fi
-    done
-    echo
-  fi
-
-  # interactive for anything missing
-  echo "PROJECT DETAILS"
+# USB-drive detection & selection
+# 
+if [[ -z "$USB_BACKUP_LABEL" ]]; then
+  echo "USB BACKUP DRIVE"
   echo "────────────────────────────────────────────────────────"
   echo
-  [[ -z "$PROJECT_NAME" ]]    && read -rp "Project name: " PROJECT_NAME
-  [[ -z "$USB_BACKUP_LABEL" ]]&& read -rp "USB backup label: " USB_BACKUP_LABEL
-  if [[ -z "$INTERVAL_MINS" ]]; then
-    read -rp "Capture interval in minutes (e.g. 5): " INTERVAL_MINS
-  fi
+  while :; do
+    # Use lsblk with pairs output for easier parsing
+    mapfile -t devices < <(
+      lsblk -ln -o NAME,LABEL -P \
+        | grep 'NAME="sd[a-z][0-9]\+"' \
+        | grep -v 'LABEL=""' \
+        | while IFS= read -r line; do
+            eval "$line"
+            echo "/dev/$NAME:$LABEL"
+          done
+    )
+
+    if (( ${#devices[@]} > 0 )); then
+      echo "Detected USB drives:"
+      for i in "${!devices[@]}"; do
+        dev="${devices[i]%%:*}"
+        lbl="${devices[i]#*:}"
+        printf "  %2d) %-12s (label=\"%s\")\n" $((i+1)) "$dev" "$lbl"
+      done
+      echo
+
+      read -rp "Select a drive [1-${#devices[@]}] or S to skip: " choice
+      
+      # Check if user wants to skip
+      if [[ "${choice^^}" == "S" ]]; then
+        echo "Skipping USB setup."
+        USB_BACKUP_LABEL=""
+        break
+      fi
+      
+      if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && (( choice <= ${#devices[@]} )); then
+        USB_BACKUP_LABEL="${devices[choice-1]#*:}"
+        echo "Using label: $USB_BACKUP_LABEL"
+        break
+      else
+        echo "Invalid choice." >&2
+      fi
+
+    else
+      echo "No labeled USB drives found."
+      read -rp "[R]etry, [M]anual entry, or [S]kip USB setup? " ans
+      case "${ans^^}" in
+        R)  continue ;;
+        M)  
+          read -rp "Enter USB label manually: " USB_BACKUP_LABEL
+          if [[ -n "$USB_BACKUP_LABEL" ]]; then
+            break
+          else
+            echo "Label cannot be empty. Please try again."
+          fi
+          ;;
+        S)  
+          echo "Skipping USB setup."
+          USB_BACKUP_LABEL=""
+          break
+          ;;
+        *)  echo "Please choose R, M, or S." ;;
+      esac
+    fi
+  done
   echo
+fi
+
+# interactive for anything missing - SKIP USB_BACKUP_LABEL prompt
+echo "PROJECT DETAILS"
+echo "────────────────────────────────────────────────────────"
+echo
+[[ -z "$PROJECT_NAME" ]] && read -rp "Project name: " PROJECT_NAME
+# Removed: [[ -z "$USB_BACKUP_LABEL" ]] && read -rp "USB backup label: " USB_BACKUP_LABEL
+if [[ -z "$INTERVAL_MINS" ]]; then
+  read -rp "Capture interval in minutes (e.g. 5): " INTERVAL_MINS
+fi
+echo
+
 
   # Configure capture time window
   echo "CAPTURE TIME WINDOW"
