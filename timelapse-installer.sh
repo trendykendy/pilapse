@@ -313,8 +313,15 @@ EOF
 }
 
 # Separate function to set up WiFi services
+# Separate function to set up WiFi services
 setup_wifi_services() {
     log_info "Configuring WiFi services..."
+    
+    # Unblock WiFi with rfkill
+    if command -v rfkill &> /dev/null; then
+        rfkill unblock wifi 2>/dev/null || true
+        echo -e "  ${GREEN}✓${NC} WiFi unblocked"
+    fi
     
     # Ensure wpa_supplicant service is enabled for wlan0
     if systemctl list-unit-files | grep -q "wpa_supplicant@.service"; then
@@ -332,6 +339,12 @@ setup_wifi_services() {
     # Kill any existing wpa_supplicant processes
     killall wpa_supplicant 2>/dev/null || true
     sleep 1
+    
+    # Bring wlan0 up
+    if ip link show wlan0 &> /dev/null; then
+        ip link set wlan0 up 2>/dev/null || true
+        sleep 1
+    fi
     
     # Start wpa_supplicant for wlan0 if interface exists
     if ip link show wlan0 &> /dev/null; then
@@ -363,6 +376,100 @@ setup_wifi_services() {
     
     echo
     log_info "WiFi will automatically connect on boot to any configured network"
+}
+
+########################################
+# FIX WIFI RFKILL BLOCKING
+########################################
+fix_wifi_rfkill() {
+    echo
+    log_info "═══════════════════════════════════════════════════════"
+    log_info "  FIXING WIFI RFKILL BLOCKING"
+    log_info "═══════════════════════════════════════════════════════"
+    echo
+    
+    # Check if WiFi is blocked
+    log_info "Checking WiFi radio status..."
+    
+    if command -v rfkill &> /dev/null; then
+        if rfkill list wifi | grep -q "Soft blocked: yes"; then
+            log_warning "WiFi is soft-blocked by rfkill - unblocking..."
+            rfkill unblock wifi
+            echo -e "  ${GREEN}✓${NC} WiFi unblocked"
+        else
+            echo -e "  ${GREEN}✓${NC} WiFi not blocked"
+        fi
+        
+        if rfkill list wifi | grep -q "Hard blocked: yes"; then
+            log_error "WiFi is hard-blocked (hardware switch)"
+            log_info "Check if there's a physical WiFi switch on the device"
+        fi
+    else
+        log_warning "rfkill command not found - skipping check"
+    fi
+    
+    # Make sure WiFi stays unblocked on boot
+    log_info "Ensuring WiFi unblocks on boot..."
+    
+    # Method 1: Using systemd service (preferred for modern systems)
+    cat > /etc/systemd/system/unblock-wifi.service << 'EOF'
+[Unit]
+Description=Unblock WiFi on boot
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/rfkill unblock wifi
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload
+    systemctl enable unblock-wifi.service
+    echo -e "  ${GREEN}✓${NC} Created systemd service to unblock WiFi on boot"
+    
+    # Method 2: Also add to rc.local as backup
+    if [[ ! -f /etc/rc.local ]]; then
+        cat > /etc/rc.local << 'EOF'
+#!/bin/sh -e
+#
+# rc.local
+#
+# This script is executed at the end of each multiuser runlevel.
+
+rfkill unblock wifi
+
+exit 0
+EOF
+        chmod +x /etc/rc.local
+        echo -e "  ${GREEN}✓${NC} Created /etc/rc.local with WiFi unblock"
+    else
+        # Add to existing rc.local if not already there
+        if ! grep -q "rfkill unblock wifi" /etc/rc.local; then
+            # Add before exit 0
+            sed -i '/^exit 0/i rfkill unblock wifi' /etc/rc.local
+            echo -e "  ${GREEN}✓${NC} Added WiFi unblock to /etc/rc.local"
+        else
+            echo -e "  ${GREEN}✓${NC} WiFi unblock already in /etc/rc.local"
+        fi
+    fi
+    
+    # Test WiFi status
+    echo
+    log_info "Current WiFi status:"
+    if command -v iwconfig &> /dev/null; then
+        iwconfig wlan0 2>/dev/null | grep -E "ESSID|Mode|Frequency" || echo "  wlan0 not configured yet"
+    fi
+    
+    if rfkill list wifi 2>/dev/null; then
+        echo
+    fi
+    
+    log_success "WiFi rfkill fix applied"
+    echo
 }
 
 
@@ -1028,6 +1135,7 @@ main() {
     
     # System-level installation steps
     install_dependencies
+    fix_wifi_rfkill          # ← Add this line
     configure_wifi
     install_rpi_connect
     create_directories
@@ -1039,6 +1147,7 @@ main() {
     
     show_summary
 }
+
 
 # Run main function
 main "$@"
