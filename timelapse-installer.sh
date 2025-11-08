@@ -381,20 +381,106 @@ prompt_decrypt_password() {
         log_info "(This password will be used for both Google Drive and email config)"
         echo
         
-        read -sp "Enter decryption password: " DECRYPT_PASSWORD || {
-            echo
-            log_error "Failed to read password input"
-            log_error "Make sure you're running this in an interactive terminal"
-            exit 1
-        }
-        echo  # Newline after password entry
+        local attempts=0
+        local max_attempts=3
         
-        if [[ -z "$DECRYPT_PASSWORD" ]]; then
-            log_error "Password cannot be empty"
-            exit 1
-        fi
+        while [[ $attempts -lt $max_attempts ]]; do
+            read -sp "Enter decryption password: " DECRYPT_PASSWORD || {
+                echo
+                log_error "Failed to read password input"
+                exit 1
+            }
+            echo  # Newline after password entry
+            
+            if [[ -z "$DECRYPT_PASSWORD" ]]; then
+                log_error "Password cannot be empty"
+                attempts=$((attempts + 1))
+                if [[ $attempts -lt $max_attempts ]]; then
+                    log_info "Try again ($((max_attempts - attempts)) attempts remaining)"
+                fi
+                DECRYPT_PASSWORD=""
+                continue
+            fi
+            
+            # Password entered, will be validated when actually used
+            return 0
+        done
+        
+        log_error "Maximum password attempts reached"
+        exit 1
     fi
 }
+
+download_and_decrypt() {
+    local url="$1"
+    local output_file="$2"
+    local temp_encrypted=$(mktemp)
+    
+    log_info "Downloading encrypted file..."
+    
+    # Download encrypted file
+    if curl -fsSL "$url" -o "$temp_encrypted"; then
+        echo -e "  ${GREEN}✓${NC} Downloaded encrypted file"
+    else
+        echo -e "  ${RED}✗${NC} Failed to download from: $url"
+        rm -f "$temp_encrypted"
+        return 1
+    fi
+    
+    # Check if file is encrypted (GPG or PGP)
+    local file_type=$(file "$temp_encrypted" 2>/dev/null)
+    if ! echo "$file_type" | grep -qE "GPG|PGP|encrypted"; then
+        log_error "Downloaded file does not appear to be encrypted"
+        log_error "File type: $file_type"
+        rm -f "$temp_encrypted"
+        return 1
+    fi
+    
+    # Decrypt file with retry logic
+    log_info "Decrypting file..."
+    local decrypt_attempts=0
+    local max_decrypt_attempts=3
+    
+    while [[ $decrypt_attempts -lt $max_decrypt_attempts ]]; do
+        if echo "$DECRYPT_PASSWORD" | gpg --decrypt --batch --yes \
+            --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/tmp/gpg-error.log; then
+            rm -f "$temp_encrypted" /tmp/gpg-error.log
+            echo -e "  ${GREEN}✓${NC} Decrypted successfully"
+            return 0
+        else
+            decrypt_attempts=$((decrypt_attempts + 1))
+            
+            if [[ $decrypt_attempts -lt $max_decrypt_attempts ]]; then
+                echo -e "  ${RED}✗${NC} Decryption failed"
+                local gpg_error=$(cat /tmp/gpg-error.log 2>/dev/null | grep -i "bad\|failed\|error" | head -1)
+                log_warning "Error: $gpg_error"
+                log_info "Try again ($((max_decrypt_attempts - decrypt_attempts)) attempts remaining)"
+                
+                # Clear the old password and prompt for new one
+                DECRYPT_PASSWORD=""
+                read -sp "Enter decryption password: " DECRYPT_PASSWORD
+                echo
+                
+                if [[ -z "$DECRYPT_PASSWORD" ]]; then
+                    log_error "Password cannot be empty"
+                    continue
+                fi
+            fi
+        fi
+    done
+    
+    # All attempts failed
+    echo -e "  ${RED}✗${NC} Decryption failed after $max_decrypt_attempts attempts"
+    local gpg_error=$(cat /tmp/gpg-error.log 2>/dev/null || echo 'Unknown error')
+    log_error "GPG error: $gpg_error"
+    log_error "Possible causes:"
+    log_error "  - Incorrect password"
+    log_error "  - File is corrupted"
+    log_error "  - Wrong encryption method"
+    rm -f "$temp_encrypted" "$output_file" /tmp/gpg-error.log
+    return 1
+}
+
 
 
 ########################################
@@ -471,52 +557,6 @@ install_rpi_connect() {
     
     return 0
 }
-
-download_and_decrypt() {
-    local url="$1"
-    local output_file="$2"
-    local temp_encrypted=$(mktemp)
-    
-    log_info "Downloading encrypted file..."
-    
-    # Download encrypted file
-    if curl -fsSL "$url" -o "$temp_encrypted"; then
-        echo -e "  ${GREEN}✓${NC} Downloaded encrypted file"
-    else
-        echo -e "  ${RED}✗${NC} Failed to download from: $url"
-        rm -f "$temp_encrypted"
-        return 1
-    fi
-    
-    # Check if file is encrypted (GPG or PGP)
-    local file_type=$(file "$temp_encrypted" 2>/dev/null)
-    if ! echo "$file_type" | grep -qE "GPG|PGP|encrypted"; then
-        log_error "Downloaded file does not appear to be encrypted"
-        log_error "File type: $file_type"
-        rm -f "$temp_encrypted"
-        return 1
-    fi
-    
-    # Decrypt file
-    log_info "Decrypting file..."
-    if echo "$DECRYPT_PASSWORD" | gpg --decrypt --batch --yes \
-        --passphrase-fd 0 "$temp_encrypted" > "$output_file" 2>/tmp/gpg-error.log; then
-        rm -f "$temp_encrypted"
-        echo -e "  ${GREEN}✓${NC} Decrypted successfully"
-        return 0
-    else
-        echo -e "  ${RED}✗${NC} Decryption failed"
-        local gpg_error=$(cat /tmp/gpg-error.log 2>/dev/null || echo 'Unknown error')
-        log_error "GPG error: $gpg_error"
-        log_error "Possible causes:"
-        log_error "  - Incorrect password"
-        log_error "  - File is corrupted"
-        log_error "  - Wrong encryption method"
-        rm -f "$temp_encrypted" "$output_file" /tmp/gpg-error.log
-        return 1
-    fi
-}
-
 
 install_gcloud_json() {
     log_info "Installing Google Cloud service account credentials..."
