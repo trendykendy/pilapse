@@ -329,6 +329,9 @@ DAILY_MONTAGE="/home/admin/daily_report_$DATE.jpg"   # Path for the daily thumbn
 LOG_FILE="/home/admin/logs/timelapse.log"       # Log file
 VERBOSE=true                                    # Toggle verbose output
 SLACK_WEBHOOK="https://hooks.slack.com/services/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"
+# Rate limiting for Slack mentions
+MENTION_COOLDOWN_FILE="/tmp/timelapse_mention_cooldown_${PROJECT_NAME// /_}"
+MENTION_COOLDOWN_SECONDS=3600  # 1 hour
 EMAIL_RECIPIENTS="daniel@aperturemedia.ie, sean@seankennedy.info"         # Recipient for daily montage email
 EMAIL_SUBJECT="Daily Report - $DATE"            # Subject for the email
 GDRIVE_REMOTE="aperturetimelapsedrive"          # Google Drive remote name
@@ -380,9 +383,50 @@ verbose_log() {
 # Helper function to send Slack notification
 notify_slack() {
     local message="$1"
+    local force_mention="${2:-false}"  # Optional parameter to force mention
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    # Check if we should mention the user
+    local mention=""
+    if [[ -n "${SLACK_USER_ID:-}" ]]; then
+        local should_mention=false
+        
+        # Force mention if explicitly requested
+        if [[ "$force_mention" == "true" ]]; then
+            should_mention=true
+        else
+            # Check cooldown
+            if [[ -f "$MENTION_COOLDOWN_FILE" ]]; then
+                local last_mention=$(cat "$MENTION_COOLDOWN_FILE")
+                local current_time=$(date +%s)
+                local time_diff=$((current_time - last_mention))
+                
+                if [[ $time_diff -ge $MENTION_COOLDOWN_SECONDS ]]; then
+                    should_mention=true
+                fi
+            else
+                # No cooldown file exists, so mention
+                should_mention=true
+            fi
+        fi
+        
+        # Add mention if appropriate
+        if [[ "$should_mention" == "true" ]]; then
+            mention="<@${SLACK_USER_ID}> "
+            # Update cooldown file
+            date +%s > "$MENTION_COOLDOWN_FILE"
+        else
+            # Still indicate it's an alert, just don't ping
+            mention="🔔 "
+        fi
+    fi
+    
+    local full_message="*[${PROJECT_NAME}]* ${timestamp}\n${mention}${message}"
+    
     curl -X POST -H 'Content-type: application/json' \
-        --data '{"text":"'"$message"'"}' "$SLACK_WEBHOOK"
+        --data '{"text":"'"$full_message"'"}' "$SLACK_WEBHOOK" 2>/dev/null
 }
+
 
 # Helper function to send email with attachment using msmtp
 send_email() {
@@ -430,7 +474,7 @@ take_photo() {
 
     # Generate filename with auto-incrementing counter and timestamp
     local counter=$(get_next_counter)
-    local timestamp=$(date +%Y%m%d_%H%M)  # e.g., 20250119_1330
+    local timestamp=$(date +%Y%m%d_%H%M)
     local photo_filename="${counter}_${timestamp}.jpg"
     local photo_path="$base_folder/$photo_filename"
 
@@ -438,48 +482,68 @@ take_photo() {
 
     # Function to attempt capturing the photo with timeout
     capture_with_timeout() {
-        timeout 30 gphoto2 --capture-image-and-download --filename "$photo_path"
+        local error_log=$(mktemp)
+        timeout 30 gphoto2 --capture-image-and-download --filename "$photo_path" 2>"$error_log"
+        local result=$?
+        local error_msg=$(cat "$error_log")
+        rm -f "$error_log"
+        
+        # Return both exit code and error message
+        if [[ $result -eq 0 ]]; then
+            return 0
+        else
+            echo "$error_msg"
+            return 1
+        fi
     }
 
     # First attempt
-    if capture_with_timeout; then
-        if [ -f "$photo_path" ]; then
-            verbose_log "Photo captured successfully: $photo_path"
-            log "Photo captured: $photo_path"
-            process_photo "$photo_path"
-            return 0
-        else
-            verbose_log "Photo capture failed: File not created."
-            log "Photo capture failed: File not created."
-        fi
+    local error_output
+    error_output=$(capture_with_timeout)
+    local capture_result=$?
+    
+    if [[ $capture_result -eq 0 ]] && [[ -f "$photo_path" ]]; then
+        verbose_log "Photo captured successfully: $photo_path"
+        log "Photo captured: $photo_path"
+        process_photo "$photo_path"
+        return 0
     else
-        verbose_log "Photo capture timed out."
-        log "Photo capture timed out."
+        verbose_log "Photo capture failed: File not created."
+        log "Photo capture failed: File not created."
+        
+        if [[ -n "$error_output" ]]; then
+            verbose_log "gphoto2 error: $error_output"
+            log "gphoto2 error: $error_output"
+        fi
     fi
 
     # Retry after failure or timeout
     verbose_log "Retrying photo capture in 10 seconds..."
     sleep 10
 
-    if capture_with_timeout; then
-        if [ -f "$photo_path" ]; then
-            verbose_log "Photo captured successfully on retry: $photo_path"
-            log "Photo captured on retry: $photo_path"
-            process_photo "$photo_path"
-            return 0
-        else
-            verbose_log "Photo capture failed on retry: File not created."
-            log "Photo capture failed on retry: File not created."
-            notify_slack "<@U0RSCG38X> Photo capture failed on retry."
-        fi
+    error_output=$(capture_with_timeout)
+    capture_result=$?
+    
+    if [[ $capture_result -eq 0 ]] && [[ -f "$photo_path" ]]; then
+        verbose_log "Photo captured successfully on retry: $photo_path"
+        log "Photo captured on retry: $photo_path"
+        process_photo "$photo_path"
+        return 0
     else
-        verbose_log "Photo capture timed out on retry."
-        log "Photo capture timed out on retry."
-        notify_slack "<@U0RSCG38X> Photo capture timed out on retry."
+        verbose_log "Photo capture failed on retry: File not created."
+        log "Photo capture failed on retry: File not created."
+        
+        # Send detailed error to Slack
+        local error_details="Photo capture failed after retry"
+        if [[ -n "$error_output" ]]; then
+            error_details="${error_details}\nError: ${error_output}"
+        fi
+        notify_slack "<@U0RSCG38X> ${error_details}"
     fi
 
     verbose_log "All attempts to capture the photo have failed."
     log "All attempts to capture the photo have failed."
+    return 1
 }
 
 
@@ -513,17 +577,22 @@ upload_photo() {
 
     verbose_log "Uploading photo to Google Drive: $photo_path"
 
-    # Upload the photo
-    rclone copy "$photo_path" "$gdrive_folder" --low-level-retries 3 --retries 3 --progress
+    # Capture rclone output
+    local upload_log=$(mktemp)
+    rclone copy "$photo_path" "$gdrive_folder" --low-level-retries 3 --retries 3 --progress 2>"$upload_log"
+    local upload_result=$?
+    local upload_error=$(cat "$upload_log")
+    rm -f "$upload_log"
 
-    if [ $? -eq 0 ]; then
+    if [[ $upload_result -eq 0 ]]; then
         verbose_log "Photo uploaded successfully. Verifying checksum..."
 
         # Verify remote file exists
         rclone ls "$remote_file_path" > /dev/null 2>&1
-        if [ $? -ne 0 ]; then
+        if [[ $? -ne 0 ]]; then
             verbose_log "Remote file not found: $remote_file_path"
             log "Error: Remote file not found for checksum verification: $photo_path"
+            notify_slack "<@U0RSCG38X> Upload verification failed: Remote file not found\nFile: $photo_filename"
             return 1
         fi
 
@@ -533,23 +602,31 @@ upload_photo() {
         # Get remote checksum
         remote_checksum=$(rclone md5sum "$gdrive_folder" | grep "$photo_filename" | awk '{print $1}')
 
-        if [ "$local_checksum" = "$remote_checksum" ]; then
+        if [[ "$local_checksum" = "$remote_checksum" ]]; then
             verbose_log "Checksum match: File integrity verified for $photo_filename"
             log "Upload successful and verified: $photo_path"
             return 0
         else
             verbose_log "Checksum mismatch: File may be corrupted. Local: $local_checksum, Remote: $remote_checksum"
             log "Error: Checksum mismatch for $photo_filename"
-            notify_slack "<@U0RSCG38X> Checksum mismatch for photo: $photo_path"
+            notify_slack "<@U0RSCG38X> Checksum mismatch for photo: $photo_filename\nLocal: $local_checksum\nRemote: $remote_checksum"
             return 1
         fi
     else
         verbose_log "Upload failed for: $photo_path"
         log "Upload failed for: $photo_path"
-        notify_slack "<@U0RSCG38X> Upload failed for photo: $photo_path"
+        
+        # Extract useful error info
+        local error_summary=$(echo "$upload_error" | grep -i "error\|failed\|quota" | head -3)
+        if [[ -z "$error_summary" ]]; then
+            error_summary="Upload failed (exit code: $upload_result)"
+        fi
+        
+        notify_slack "<@U0RSCG38X> Upload failed for photo: $photo_filename\nError: $error_summary"
         return 1
     fi
 }
+
 
 
 # Backup photo locally with checksum verification
@@ -561,47 +638,48 @@ backup_photo() {
     verbose_log "Backing up photo locally: $photo_path"
 
     # Create the backup directory if it doesn't exist
-    mkdir -p "$backup_path"
-    if [ $? -ne 0 ]; then
-        verbose_log "Failed to create backup directory: $backup_path"
-        log "Error: Failed to create backup directory: $backup_path"
-        notify_slack "<@U0RSCG38X> Error: Backup directory creation failed: $backup_path. Possible USB drive failure."
+    mkdir -p "$backup_path" 2>&1
+    if [[ $? -ne 0 ]]; then
+        local error_msg="Failed to create backup directory: $backup_path"
+        verbose_log "$error_msg"
+        log "Error: $error_msg"
+        notify_slack "<@U0RSCG38X> Backup directory creation failed\nPath: $backup_path\nPossible USB drive failure"
         return 1
     fi
 
     # Calculate checksum of the original file
     local original_checksum
     original_checksum=$(md5sum "$photo_path" | awk '{print $1}')
-    if [ -z "$original_checksum" ]; then
+    if [[ -z "$original_checksum" ]]; then
         verbose_log "Failed to calculate checksum for original file: $photo_path"
         log "Error: Failed to calculate checksum for original file: $photo_path"
-        notify_slack "Error: Checksum calculation failed for original file: $photo_path"
+        notify_slack "<@U0RSCG38X> Checksum calculation failed\nFile: $photo_name"
         return 1
     fi
 
     # Attempt to move the file to the backup directory
-    mv "$photo_path" "$backup_path"
-    if [ $? -ne 0 ]; then
+    local mv_error=$(mv "$photo_path" "$backup_path" 2>&1)
+    if [[ $? -ne 0 ]]; then
         verbose_log "Failed to move photo to backup directory: $backup_path"
         log "Error: Failed to back up photo: $photo_path"
-        notify_slack "<@U0RSCG38X> Error: Failed to back up photo: $photo_path. Possible USB drive failure."
+        notify_slack "<@U0RSCG38X> Failed to backup photo\nFile: $photo_name\nError: $mv_error\nPossible USB drive failure"
         return 1
     fi
 
     # Verify the file in the backup directory
     local backup_checksum
     backup_checksum=$(md5sum "$backup_path/$photo_name" | awk '{print $1}')
-    if [ -z "$backup_checksum" ]; then
+    if [[ -z "$backup_checksum" ]]; then
         verbose_log "Failed to calculate checksum for backup file: $backup_path/$photo_name"
         log "Error: Failed to calculate checksum for backup file: $backup_path/$photo_name"
-        notify_slack "<@U0RSCG38X> Error: Checksum calculation failed for backup file: $backup_path/$photo_name. Possible USB drive failure."
+        notify_slack "<@U0RSCG38X> Backup checksum verification failed\nFile: $photo_name\nPossible USB drive failure"
         return 1
     fi
 
-    if [ "$original_checksum" != "$backup_checksum" ]; then
+    if [[ "$original_checksum" != "$backup_checksum" ]]; then
         verbose_log "Checksum mismatch: Backup may be corrupted. Original: $original_checksum, Backup: $backup_checksum"
         log "Error: Backup verification failed for photo: $photo_path"
-        notify_slack "<@U0RSCG38X> Error: Backup verification failed for photo: $photo_path. Possible USB drive failure."
+        notify_slack "<@U0RSCG38X> Backup verification failed\nFile: $photo_name\nOriginal checksum: $original_checksum\nBackup checksum: $backup_checksum\nPossible USB drive failure"
         return 1
     fi
 
@@ -1451,6 +1529,14 @@ case "${1:-}" in
         tail -10 "$LOG_FILE"
     else
         echo "No log file found"
+    fi
+    ;;
+  reset-mention-cooldown)
+    if [[ -f "$MENTION_COOLDOWN_FILE" ]]; then
+        rm -f "$MENTION_COOLDOWN_FILE"
+        echo "Mention cooldown reset - next error will ping user"
+    else
+        echo "No active cooldown"
     fi
     ;;
   test-backup-failure)
