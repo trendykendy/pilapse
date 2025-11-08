@@ -300,6 +300,37 @@ EOF
         fi
     done
     
+    # In configure_wifi() function, add this before the final summary:
+
+# Check and fix rfkill blocking WiFi
+log_info "Checking WiFi radio status..."
+if rfkill list wifi | grep -q "Soft blocked: yes"; then
+    log_warning "WiFi is blocked by rfkill - unblocking..."
+    sudo rfkill unblock wifi
+    echo -e "  ${GREEN}✓${NC} WiFi unblocked"
+else
+    echo -e "  ${GREEN}✓${NC} WiFi not blocked"
+fi
+
+# Make sure it stays unblocked on boot
+if ! grep -q "rfkill unblock wifi" /etc/rc.local 2>/dev/null; then
+    log_info "Adding rfkill unblock to startup..."
+    # Create rc.local if it doesn't exist
+    if [[ ! -f /etc/rc.local ]]; then
+        cat > /etc/rc.local << 'EOF'
+#!/bin/sh -e
+rfkill unblock wifi
+exit 0
+EOF
+        chmod +x /etc/rc.local
+    else
+        # Add before exit 0
+        sed -i '/^exit 0/i rfkill unblock wifi' /etc/rc.local
+    fi
+    echo -e "  ${GREEN}✓${NC} WiFi will be unblocked on boot"
+fi
+
+
     # Show summary of all configured networks
     echo
     echo "All WiFi networks now configured:"
