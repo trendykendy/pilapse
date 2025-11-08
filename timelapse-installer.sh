@@ -572,6 +572,7 @@ install_gcloud_json() {
         return 1
     fi
 }
+
 configure_rclone() {
     echo
     log_info "═══════════════════════════════════════════════════════"
@@ -597,19 +598,16 @@ configure_rclone() {
     fi
     
     # Install JSON file (will auto-download and decrypt)
-    if ! json_path=$(install_gcloud_json); then
+    json_path=$(install_gcloud_json)
+    local install_result=$?
+    
+    if [[ $install_result -ne 0 ]] || [[ -z "$json_path" ]] || [[ ! -f "$json_path" ]]; then
         log_error "Failed to install service account JSON"
         echo
         log_info "Skipping rclone configuration"
         log_info "You can configure manually later with: sudo rclone config"
         echo
         return 0  # Don't fail the entire installation
-    fi
-    
-    if [[ -z "$json_path" ]] || [[ ! -f "$json_path" ]]; then
-        log_error "Service account JSON file not found at: $json_path"
-        log_info "Skipping rclone configuration"
-        return 0
     fi
     
     # Create rclone config automatically
@@ -661,7 +659,6 @@ EOF
     
     return 0
 }
-
 
 install_msmtp_config() {
     log_info "Installing email (msmtp) configuration..."
