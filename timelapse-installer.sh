@@ -256,38 +256,38 @@ configure_wifi() {
         nmcli -t -f DEVICE,IP4.ADDRESS device show eth0 2>/dev/null | grep IP4.ADDRESS | cut -d: -f2 | sed 's/^/  IP Address: /' || true
     fi
     
-    # Check WiFi
-    current_wifi=$(nmcli -t -f ACTIVE,SSID dev wifi | grep '^yes' | cut -d: -f2)
-    if [[ -n "$current_wifi" ]]; then
-        echo -e "  ${GREEN}✓${NC} Connected to WiFi: $current_wifi"
-        nmcli -t -f DEVICE,IP4.ADDRESS device show wlan0 2>/dev/null | grep IP4.ADDRESS | cut -d: -f2 | sed 's/^/  IP Address: /' || true
-    fi
-    
-        # Show configured WiFi networks
-    echo
-    echo "WiFi networks already configured:"
-    
-    local wifi_connections=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2=="802-11-wireless" {print "  - " $1}')
-    
-    if [[ -n "$wifi_connections" ]]; then
-        echo "$wifi_connections"
-    else
-        echo "  (none configured yet)"
-    fi
-    echo
+   # Check WiFi
+current_wifi=$(nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | grep '^yes' | cut -d: -f2 || echo "")
+if [[ -n "$current_wifi" ]]; then
+    echo -e "  ${GREEN}✓${NC} Connected to WiFi: $current_wifi"
+    nmcli -t -f DEVICE,IP4.ADDRESS device show wlan0 2>/dev/null | grep IP4.ADDRESS | cut -d: -f2 | sed 's/^/  IP Address: /' || true
+fi
 
-    
-    log_info "You can configure WiFi networks that the Pi will connect to"
-    log_info "when available (useful for multiple locations/job sites)"
-    echo
-    
-    read -p "Configure WiFi networks? (y/n): " -n 1 -r
-    echo
-    
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log_info "Skipping WiFi configuration"
-        return 0
-    fi
+# Show configured WiFi networks
+echo
+echo "WiFi networks already configured:"
+
+local wifi_connections=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2=="802-11-wireless" {print "  - " $1}')
+
+if [[ -n "$wifi_connections" ]]; then
+    echo "$wifi_connections"
+else
+    echo "  (none configured yet)"
+fi
+echo
+
+log_info "You can configure WiFi networks that the Pi will connect to"
+log_info "when available (useful for multiple locations/job sites)"
+echo
+
+read -p "Configure WiFi networks? (y/n): " -n 1 -r
+echo
+
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    log_info "Skipping WiFi configuration"
+    return 0
+fi
+
     
     # Scan for available networks
     if ip link show wlan0 &> /dev/null; then
