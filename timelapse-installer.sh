@@ -263,15 +263,19 @@ configure_wifi() {
         nmcli -t -f DEVICE,IP4.ADDRESS device show wlan0 2>/dev/null | grep IP4.ADDRESS | cut -d: -f2 | sed 's/^/  IP Address: /' || true
     fi
     
-    # Show configured WiFi networks
+        # Show configured WiFi networks
     echo
     echo "WiFi networks already configured:"
-    if nmcli -t -f NAME,TYPE connection show | grep -q ":802-11-wireless$"; then
-        nmcli -t -f NAME,TYPE connection show | grep ":802-11-wireless$" | cut -d: -f1 | sed 's/^/  - /'
+    
+    local wifi_connections=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | awk -F: '$2=="802-11-wireless" {print "  - " $1}')
+    
+    if [[ -n "$wifi_connections" ]]; then
+        echo "$wifi_connections"
     else
         echo "  (none configured yet)"
     fi
     echo
+
     
     log_info "You can configure WiFi networks that the Pi will connect to"
     log_info "when available (useful for multiple locations/job sites)"
