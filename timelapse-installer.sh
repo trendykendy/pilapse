@@ -193,6 +193,9 @@ install_dependencies() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
+########################################
+# WIFI CONFIGURATION
+########################################
 configure_wifi() {
     echo
     log_info "═══════════════════════════════════════════════════════"
@@ -200,43 +203,71 @@ configure_wifi() {
     log_info "═══════════════════════════════════════════════════════"
     echo
     
-    # Check if wpa_supplicant.conf exists
-    WPA_CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
-    
-    if [[ ! -f "$WPA_CONF" ]]; then
-        # Create basic wpa_supplicant.conf if it doesn't exist
-        cat > "$WPA_CONF" <<EOF
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=IE
-
-EOF
-        log_info "Created new wpa_supplicant.conf"
+    # Install NetworkManager if not present
+    if ! command -v nmcli &> /dev/null; then
+        log_info "Installing NetworkManager..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y network-manager
+        echo -e "  ${GREEN}✓${NC} NetworkManager installed"
+    else
+        log_info "NetworkManager already installed"
     fi
     
-    # Show current connection status (informational only)
-    echo "Current network status:"
-    if command -v iwgetid &> /dev/null; then
-        current_ssid=$(iwgetid -r 2>/dev/null || echo "")
-        if [[ -n "$current_ssid" ]]; then
-            echo -e "  ${GREEN}✓${NC} Currently connected to WiFi: $current_ssid"
-            ip addr show wlan0 2>/dev/null | grep "inet " | awk '{print "  IP Address: " $2}' || true
-        else
-            # Check if wired connection exists
-            if ip addr show eth0 2>/dev/null | grep -q "state UP"; then
-                echo -e "  ${GREEN}✓${NC} Connected via Ethernet"
-                ip addr show eth0 | grep "inet " | awk '{print "  IP Address: " $2}'
-            else
-                echo -e "  ${YELLOW}⚠${NC} Not currently connected to any network"
-            fi
+    # Fix NetworkManager configuration to manage all interfaces
+    log_info "Configuring NetworkManager..."
+    
+    if [[ -f /etc/NetworkManager/NetworkManager.conf ]]; then
+        # Update managed=false to managed=true in [ifupdown] section
+        if grep -q "^\[ifupdown\]" /etc/NetworkManager/NetworkManager.conf; then
+            sed -i '/^\[ifupdown\]/,/^\[/ s/managed=false/managed=true/' /etc/NetworkManager/NetworkManager.conf
+            echo -e "  ${GREEN}✓${NC} Set NetworkManager to manage all interfaces"
         fi
     fi
-    echo
     
-    # Show currently configured WiFi networks
-    echo "WiFi networks configured in wpa_supplicant.conf:"
-    if grep -q "^[[:space:]]*network=" "$WPA_CONF" 2>/dev/null; then
-        grep "ssid=" "$WPA_CONF" | sed 's/.*ssid="\(.*\)".*/  - \1/'
+    # Disable conflicting services
+    log_info "Disabling conflicting services..."
+    systemctl disable dhcpcd 2>/dev/null || true
+    systemctl stop dhcpcd 2>/dev/null || true
+    systemctl disable wpa_supplicant 2>/dev/null || true
+    systemctl stop wpa_supplicant 2>/dev/null || true
+    killall wpa_supplicant 2>/dev/null || true
+    echo -e "  ${GREEN}✓${NC} Conflicting services disabled"
+    
+    # Enable and start NetworkManager
+    systemctl enable NetworkManager 2>/dev/null || true
+    systemctl restart NetworkManager
+    sleep 3
+    echo -e "  ${GREEN}✓${NC} NetworkManager enabled and started"
+    
+    # Make sure wlan0 is managed
+    if ip link show wlan0 &> /dev/null; then
+        nmcli device set wlan0 managed yes 2>/dev/null || true
+        ip link set wlan0 up 2>/dev/null || true
+        nmcli radio wifi on 2>/dev/null || true
+        sleep 2
+    fi
+    
+    # Show current connection status
+    echo
+    echo "Current network status:"
+    
+    # Check Ethernet
+    if nmcli device status | grep -q "^eth0.*connected"; then
+        echo -e "  ${GREEN}✓${NC} Connected via Ethernet"
+        nmcli -t -f DEVICE,IP4.ADDRESS device show eth0 2>/dev/null | grep IP4.ADDRESS | cut -d: -f2 | sed 's/^/  IP Address: /' || true
+    fi
+    
+    # Check WiFi
+    current_wifi=$(nmcli -t -f ACTIVE,SSID dev wifi | grep '^yes' | cut -d: -f2)
+    if [[ -n "$current_wifi" ]]; then
+        echo -e "  ${GREEN}✓${NC} Connected to WiFi: $current_wifi"
+        nmcli -t -f DEVICE,IP4.ADDRESS device show wlan0 2>/dev/null | grep IP4.ADDRESS | cut -d: -f2 | sed 's/^/  IP Address: /' || true
+    fi
+    
+    # Show configured WiFi networks
+    echo
+    echo "WiFi networks already configured:"
+    if nmcli -t -f NAME,TYPE connection show | grep -q ":802-11-wireless$"; then
+        nmcli -t -f NAME,TYPE connection show | grep ":802-11-wireless$" | cut -d: -f1 | sed 's/^/  - /'
     else
         echo "  (none configured yet)"
     fi
@@ -251,9 +282,23 @@ EOF
     
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "Skipping WiFi configuration"
-        # Still ensure services are enabled even if skipping
-        setup_wifi_services
         return 0
+    fi
+    
+    # Scan for available networks
+    if ip link show wlan0 &> /dev/null; then
+        log_info "Scanning for WiFi networks..."
+        nmcli device wifi rescan 2>/dev/null || true
+        sleep 3
+        
+        echo
+        echo "Available networks (showing top 10):"
+        nmcli -t -f SSID,SIGNAL,SECURITY device wifi list 2>/dev/null | grep -v "^::" | sort -t: -k2 -rn | head -10 | while IFS=: read -r ssid signal security; do
+            if [[ -n "$ssid" ]]; then
+                printf "  - %-30s (Signal: %3s%%, Security: %s)\n" "$ssid" "$signal" "$security"
+            fi
+        done
+        echo
     fi
     
     # Add networks
@@ -265,31 +310,52 @@ EOF
             break
         fi
         
-        # Check if this SSID already exists
-        if grep -q "ssid=\"$wifi_ssid\"" "$WPA_CONF" 2>/dev/null; then
-            log_warning "Network '$wifi_ssid' is already configured"
-            read -p "Reconfigure it? (y/n): " -n 1 -r
+        # Password input with validation
+        local password_valid=false
+        local wifi_password=""
+        
+        while [[ "$password_valid" == false ]]; do
+            read -rsp "WiFi Password: " wifi_password
             echo
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            
+            if [[ -z "$wifi_password" ]]; then
+                log_error "Password cannot be empty"
                 continue
             fi
-            # Remove existing entry
-            awk '/network=\{/,/\}/ {if (/ssid="'"$wifi_ssid"'"/) {skip=1} if (skip && /\}/) {skip=0; next} if (!skip) print; next} 1' "$WPA_CONF" > "$WPA_CONF.tmp"
-            mv "$WPA_CONF.tmp" "$WPA_CONF"
-        fi
+            
+            # Check password length (WPA requires 8-63 characters)
+            local pass_length=${#wifi_password}
+            if [[ $pass_length -lt 8 ]]; then
+                log_error "Password too short (minimum 8 characters, you entered $pass_length)"
+                continue
+            elif [[ $pass_length -gt 63 ]]; then
+                log_error "Password too long (maximum 63 characters, you entered $pass_length)"
+                continue
+            fi
+            
+            # Password is valid
+            password_valid=true
+        done
         
-        read -rsp "WiFi Password: " wifi_password
-        echo
-        
-        if [[ -z "$wifi_password" ]]; then
-            log_error "Password cannot be empty"
-            continue
-        fi
-        
-        # Generate PSK using wpa_passphrase
+        # Try to connect with NetworkManager
         log_info "Adding network: $wifi_ssid"
-        wpa_passphrase "$wifi_ssid" "$wifi_password" >> "$WPA_CONF"
-        echo -e "  ${GREEN}✓${NC} Added: $wifi_ssid"
+        
+        if nmcli device wifi connect "$wifi_ssid" password "$wifi_password" 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} Connected to: $wifi_ssid"
+            # Show IP address
+            sleep 2
+            nmcli -t -f DEVICE,IP4.ADDRESS device show wlan0 2>/dev/null | grep IP4.ADDRESS | cut -d: -f2 | sed 's/^/  IP Address: /' || true
+        else
+            # Network might not be in range, but it's saved for later
+            log_warning "Could not connect to $wifi_ssid (may not be in range)"
+            
+            # Try to add it as a saved connection anyway
+            if nmcli connection add type wifi con-name "$wifi_ssid" ifname wlan0 ssid "$wifi_ssid" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$wifi_password" 2>/dev/null; then
+                echo -e "  ${YELLOW}⚠${NC} Saved for later: $wifi_ssid"
+            else
+                log_error "Failed to save network: $wifi_ssid"
+            fi
+        fi
         
         echo
         read -p "Add another WiFi network? (y/n): " -n 1 -r
@@ -299,178 +365,32 @@ EOF
         fi
     done
     
-    # Show summary of all configured networks
+    # Show summary
     echo
-    echo "All WiFi networks now configured:"
-    grep "ssid=" "$WPA_CONF" | sed 's/.*ssid="\(.*\)".*/  - \1/'
-    echo
+    echo "All configured WiFi networks:"
+    if nmcli -t -f NAME,TYPE connection show | grep -q ":802-11-wireless$"; then
+        nmcli -t -f NAME,TYPE connection show | grep ":802-11-wireless$" | cut -d: -f1 | sed 's/^/  - /'
+    else
+        echo "  (none)"
+    fi
     
-    # Set up WiFi services
-    setup_wifi_services
+    # Show current connection
+    echo
+    current_wifi=$(nmcli -t -f ACTIVE,SSID dev wifi | grep '^yes' | cut -d: -f2)
+    if [[ -n "$current_wifi" ]]; then
+        echo -e "${GREEN}✓${NC} Currently connected to: $current_wifi"
+        nmcli -t -f DEVICE,IP4.ADDRESS device show wlan0 2>/dev/null | grep IP4.ADDRESS | cut -d: -f2 | sed 's/^/  IP Address: /' || true
+    else
+        echo -e "${YELLOW}⚠${NC} Not currently connected to WiFi"
+        echo "  Will auto-connect when in range of a configured network"
+    fi
     
     echo
-    return 0
+    log_success "WiFi configuration complete"
+    log_info "NetworkManager will automatically connect to saved networks"
+    echo
 }
 
-# Separate function to set up WiFi services
-# Separate function to set up WiFi services
-setup_wifi_services() {
-    log_info "Configuring WiFi services..."
-    
-    # Unblock WiFi with rfkill
-    if command -v rfkill &> /dev/null; then
-        rfkill unblock wifi 2>/dev/null || true
-        echo -e "  ${GREEN}✓${NC} WiFi unblocked"
-    fi
-    
-    # Ensure wpa_supplicant service is enabled for wlan0
-    if systemctl list-unit-files | grep -q "wpa_supplicant@.service"; then
-        systemctl enable wpa_supplicant@wlan0.service 2>/dev/null || true
-        echo -e "  ${GREEN}✓${NC} wpa_supplicant@wlan0 service enabled"
-    fi
-    
-    # Ensure dhcpcd is enabled for automatic IP assignment
-    if command -v dhcpcd &> /dev/null; then
-        systemctl enable dhcpcd 2>/dev/null || true
-        systemctl start dhcpcd 2>/dev/null || true
-        echo -e "  ${GREEN}✓${NC} dhcpcd service enabled"
-    fi
-    
-    # Kill any existing wpa_supplicant processes
-    killall wpa_supplicant 2>/dev/null || true
-    sleep 1
-    
-    # Bring wlan0 up
-    if ip link show wlan0 &> /dev/null; then
-        ip link set wlan0 up 2>/dev/null || true
-        sleep 1
-    fi
-    
-    # Start wpa_supplicant for wlan0 if interface exists
-    if ip link show wlan0 &> /dev/null; then
-        log_info "Starting WiFi connection..."
-        
-        # Start wpa_supplicant in background
-        wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant.conf 2>/dev/null
-        
-        # Wait for connection
-        sleep 5
-        
-        # Request IP address
-        dhclient wlan0 2>/dev/null || dhcpcd wlan0 2>/dev/null || true
-        
-        # Check if connected
-        sleep 2
-        current_ssid=$(iwgetid -r 2>/dev/null || echo "")
-        if [[ -n "$current_ssid" ]]; then
-            echo -e "  ${GREEN}✓${NC} Connected to: $current_ssid"
-            ip addr show wlan0 | grep "inet " | awk '{print "  IP Address: " $2}' || true
-        else
-            echo -e "  ${YELLOW}⚠${NC} Not connected to WiFi right now"
-            echo "  The Pi will connect automatically when in range of a configured network"
-        fi
-    else
-        log_warning "No WiFi interface (wlan0) detected"
-        log_info "WiFi networks saved - will be used when WiFi hardware is available"
-    fi
-    
-    echo
-    log_info "WiFi will automatically connect on boot to any configured network"
-}
-
-########################################
-# FIX WIFI RFKILL BLOCKING
-########################################
-fix_wifi_rfkill() {
-    echo
-    log_info "═══════════════════════════════════════════════════════"
-    log_info "  FIXING WIFI RFKILL BLOCKING"
-    log_info "═══════════════════════════════════════════════════════"
-    echo
-    
-    # Check if WiFi is blocked
-    log_info "Checking WiFi radio status..."
-    
-    if command -v rfkill &> /dev/null; then
-        if rfkill list wifi | grep -q "Soft blocked: yes"; then
-            log_warning "WiFi is soft-blocked by rfkill - unblocking..."
-            rfkill unblock wifi
-            echo -e "  ${GREEN}✓${NC} WiFi unblocked"
-        else
-            echo -e "  ${GREEN}✓${NC} WiFi not blocked"
-        fi
-        
-        if rfkill list wifi | grep -q "Hard blocked: yes"; then
-            log_error "WiFi is hard-blocked (hardware switch)"
-            log_info "Check if there's a physical WiFi switch on the device"
-        fi
-    else
-        log_warning "rfkill command not found - skipping check"
-    fi
-    
-    # Make sure WiFi stays unblocked on boot
-    log_info "Ensuring WiFi unblocks on boot..."
-    
-    # Method 1: Using systemd service (preferred for modern systems)
-    cat > /etc/systemd/system/unblock-wifi.service << 'EOF'
-[Unit]
-Description=Unblock WiFi on boot
-After=network-pre.target
-Before=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/rfkill unblock wifi
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    
-    systemctl daemon-reload
-    systemctl enable unblock-wifi.service
-    echo -e "  ${GREEN}✓${NC} Created systemd service to unblock WiFi on boot"
-    
-    # Method 2: Also add to rc.local as backup
-    if [[ ! -f /etc/rc.local ]]; then
-        cat > /etc/rc.local << 'EOF'
-#!/bin/sh -e
-#
-# rc.local
-#
-# This script is executed at the end of each multiuser runlevel.
-
-rfkill unblock wifi
-
-exit 0
-EOF
-        chmod +x /etc/rc.local
-        echo -e "  ${GREEN}✓${NC} Created /etc/rc.local with WiFi unblock"
-    else
-        # Add to existing rc.local if not already there
-        if ! grep -q "rfkill unblock wifi" /etc/rc.local; then
-            # Add before exit 0
-            sed -i '/^exit 0/i rfkill unblock wifi' /etc/rc.local
-            echo -e "  ${GREEN}✓${NC} Added WiFi unblock to /etc/rc.local"
-        else
-            echo -e "  ${GREEN}✓${NC} WiFi unblock already in /etc/rc.local"
-        fi
-    fi
-    
-    # Test WiFi status
-    echo
-    log_info "Current WiFi status:"
-    if command -v iwconfig &> /dev/null; then
-        iwconfig wlan0 2>/dev/null | grep -E "ESSID|Mode|Frequency" || echo "  wlan0 not configured yet"
-    fi
-    
-    if rfkill list wifi 2>/dev/null; then
-        echo
-    fi
-    
-    log_success "WiFi rfkill fix applied"
-    echo
-}
 
 
 create_directories() {
@@ -1135,8 +1055,7 @@ main() {
     
     # System-level installation steps
     install_dependencies
-    fix_wifi_rfkill          # ← Add this line
-    configure_wifi
+    configure_wifi              # Now uses NetworkManager - much simpler!
     install_rpi_connect
     create_directories
     configure_rclone
@@ -1147,6 +1066,7 @@ main() {
     
     show_summary
 }
+
 
 
 # Run main function
