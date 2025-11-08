@@ -583,12 +583,12 @@ install_gcloud_json() {
             log_warning "Make sure this email has access to your Google Drive folder!"
             echo
             
-            echo "$json_dest"
+            # Don't echo the path - just return success
             return 0
         else
             echo
             log_error "Decrypted file is not valid JSON"
-            log_error "File contents:"
+            log_error "File contents (first 5 lines):"
             head -n 5 "$json_dest" 2>/dev/null || echo "(unable to read file)"
             rm -f "$json_dest"
             return 1
@@ -596,22 +596,10 @@ install_gcloud_json() {
     else
         echo
         log_error "Could not download/decrypt service account JSON"
-        log_error "URL: $GCLOUD_JSON_URL"
-        log_error "Please check:"
-        log_error "  1. The file exists at the URL above"
-        log_error "  2. The decryption password is correct"
-        log_error "  3. You have internet connectivity"
-        
-        # Test if we can reach the URL
-        if curl -fsSL --head "$GCLOUD_JSON_URL" &> /dev/null; then
-            log_info "✓ URL is reachable"
-        else
-            log_error "✗ Cannot reach URL - check your internet connection"
-        fi
-        
         return 1
     fi
 }
+
 
 configure_rclone() {
     echo
@@ -638,16 +626,20 @@ configure_rclone() {
     fi
     
     # Install JSON file (will auto-download and decrypt)
-    json_path=$(install_gcloud_json)
+    # Don't capture output - let it print normally
+    install_gcloud_json
     local install_result=$?
     
-    if [[ $install_result -ne 0 ]] || [[ -z "$json_path" ]] || [[ ! -f "$json_path" ]]; then
+    # The function already printed the path, so we know where it is
+    local json_path="$USER_HOME/timelapsecamdriveauth-12192b48330a.json"
+    
+    if [[ $install_result -ne 0 ]] || [[ ! -f "$json_path" ]]; then
         log_error "Failed to install service account JSON"
         echo
         log_info "Skipping rclone configuration"
         log_info "You can configure manually later with: sudo rclone config"
         echo
-        return 0  # Don't fail the entire installation
+        return 0
     fi
     
     # Create rclone config automatically
