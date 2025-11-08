@@ -626,7 +626,6 @@ configure_rclone() {
     fi
     
     # Install JSON file (will auto-download and decrypt)
-    # Don't capture output - let it print normally
     install_gcloud_json
     local install_result=$?
     
@@ -642,6 +641,23 @@ configure_rclone() {
         return 0
     fi
     
+    # Prompt for Shared Drive ID with default
+    echo
+    log_info "SHARED DRIVE CONFIGURATION"
+    log_info "Service accounts require a Shared Drive (Team Drive)"
+    echo
+    
+    local default_team_drive="0AG_E72sodQBVUk9PVA"
+    local team_drive_id=""
+    
+    read -p "Enter Shared Drive ID (press Enter for default): " team_drive_id
+    
+    # Use default if empty
+    if [[ -z "$team_drive_id" ]]; then
+        team_drive_id="$default_team_drive"
+        log_info "Using default Shared Drive ID: $team_drive_id"
+    fi
+    
     # Create rclone config automatically
     log_info "Creating rclone configuration..."
     cat > /root/.config/rclone/rclone.conf << EOF
@@ -649,7 +665,7 @@ configure_rclone() {
 type = drive
 scope = drive
 service_account_file = $json_path
-team_drive = 
+team_drive = $team_drive_id
 EOF
     
     chmod 600 /root/.config/rclone/rclone.conf
@@ -661,6 +677,7 @@ EOF
     if timeout 10 rclone lsd aperturetimelapsedrive: > /dev/null 2>&1; then
         echo -e "  ${GREEN}✓${NC} Google Drive connection successful"
         log_info "Remote name: aperturetimelapsedrive"
+        log_info "Shared Drive ID: $team_drive_id"
         echo
         log_success "Google Drive configured successfully"
     else
@@ -668,13 +685,20 @@ EOF
         echo
         log_warning "Connection test failed. This could mean:"
         log_warning "  1. The service account JSON is incorrect"
-        log_warning "  2. The Drive folder hasn't been shared with the service account"
-        log_warning "  3. Network connectivity issues"
+        log_warning "  2. The Shared Drive ID is incorrect"
+        log_warning "  3. The service account hasn't been added to the Shared Drive"
+        log_warning "  4. Network connectivity issues"
         echo
         
         local sa_email=$(jq -r '.client_email' "$json_path" 2>/dev/null || echo 'unknown')
         log_info "Service account email: $sa_email"
-        log_info "Make sure you've shared your Google Drive folder with this email!"
+        echo
+        log_warning "IMPORTANT: Add this email to your Shared Drive:"
+        log_warning "  1. Go to drive.google.com and open 'Shared drives'"
+        log_warning "  2. Click on your Shared Drive"
+        log_warning "  3. Click 'Manage members'"
+        log_warning "  4. Add: $sa_email"
+        log_warning "  5. Give it 'Content manager' or 'Manager' permissions"
         echo
         
         read -p "Continue anyway? (y/n): " -n 1 -r || {
@@ -691,6 +715,7 @@ EOF
     
     return 0
 }
+
 
 install_msmtp_config() {
     log_info "Installing email (msmtp) configuration..."
