@@ -193,9 +193,6 @@ install_dependencies() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
-########################################
-# WIFI CONFIGURATION
-########################################
 configure_wifi() {
     echo
     log_info "═══════════════════════════════════════════════════════"
@@ -254,6 +251,8 @@ EOF
     
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "Skipping WiFi configuration"
+        # Still ensure services are enabled even if skipping
+        setup_wifi_services
         return 0
     fi
     
@@ -300,64 +299,62 @@ EOF
         fi
     done
     
-    # In configure_wifi() function, add this before the final summary:
-
-# Check and fix rfkill blocking WiFi
-log_info "Checking WiFi radio status..."
-if rfkill list wifi | grep -q "Soft blocked: yes"; then
-    log_warning "WiFi is blocked by rfkill - unblocking..."
-    sudo rfkill unblock wifi
-    echo -e "  ${GREEN}✓${NC} WiFi unblocked"
-else
-    echo -e "  ${GREEN}✓${NC} WiFi not blocked"
-fi
-
-# Make sure it stays unblocked on boot
-if ! grep -q "rfkill unblock wifi" /etc/rc.local 2>/dev/null; then
-    log_info "Adding rfkill unblock to startup..."
-    # Create rc.local if it doesn't exist
-    if [[ ! -f /etc/rc.local ]]; then
-        cat > /etc/rc.local << 'EOF'
-#!/bin/sh -e
-rfkill unblock wifi
-exit 0
-EOF
-        chmod +x /etc/rc.local
-    else
-        # Add before exit 0
-        sed -i '/^exit 0/i rfkill unblock wifi' /etc/rc.local
-    fi
-    echo -e "  ${GREEN}✓${NC} WiFi will be unblocked on boot"
-fi
-
-
     # Show summary of all configured networks
     echo
     echo "All WiFi networks now configured:"
     grep "ssid=" "$WPA_CONF" | sed 's/.*ssid="\(.*\)".*/  - \1/'
     echo
     
-    # Reconfigure WiFi (only if wlan0 exists)
+    # Set up WiFi services
+    setup_wifi_services
+    
+    echo
+    return 0
+}
+
+# Separate function to set up WiFi services
+setup_wifi_services() {
+    log_info "Configuring WiFi services..."
+    
+    # Ensure wpa_supplicant service is enabled for wlan0
+    if systemctl list-unit-files | grep -q "wpa_supplicant@.service"; then
+        systemctl enable wpa_supplicant@wlan0.service 2>/dev/null || true
+        echo -e "  ${GREEN}✓${NC} wpa_supplicant@wlan0 service enabled"
+    fi
+    
+    # Ensure dhcpcd is enabled for automatic IP assignment
+    if command -v dhcpcd &> /dev/null; then
+        systemctl enable dhcpcd 2>/dev/null || true
+        systemctl start dhcpcd 2>/dev/null || true
+        echo -e "  ${GREEN}✓${NC} dhcpcd service enabled"
+    fi
+    
+    # Kill any existing wpa_supplicant processes
+    killall wpa_supplicant 2>/dev/null || true
+    sleep 1
+    
+    # Start wpa_supplicant for wlan0 if interface exists
     if ip link show wlan0 &> /dev/null; then
-        log_info "Applying WiFi configuration..."
-        wpa_cli -i wlan0 reconfigure > /dev/null 2>&1 || true
-        echo -e "  ${GREEN}✓${NC} WiFi configuration applied"
+        log_info "Starting WiFi connection..."
         
-        echo
-        log_info "The Pi will automatically connect to any configured network"
-        log_info "when it's in range. No need to be connected now."
+        # Start wpa_supplicant in background
+        wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant.conf 2>/dev/null
         
-        # Give it a moment and show status
-        sleep 3
-        echo
-        echo "Current WiFi status:"
+        # Wait for connection
+        sleep 5
+        
+        # Request IP address
+        dhclient wlan0 2>/dev/null || dhcpcd wlan0 2>/dev/null || true
+        
+        # Check if connected
+        sleep 2
         current_ssid=$(iwgetid -r 2>/dev/null || echo "")
         if [[ -n "$current_ssid" ]]; then
             echo -e "  ${GREEN}✓${NC} Connected to: $current_ssid"
-            ip addr show wlan0 2>/dev/null | grep "inet " | awk '{print "  IP Address: " $2}' || true
+            ip addr show wlan0 | grep "inet " | awk '{print "  IP Address: " $2}' || true
         else
             echo -e "  ${YELLOW}⚠${NC} Not connected to WiFi right now"
-            echo "  (Will connect automatically when in range of a configured network)"
+            echo "  The Pi will connect automatically when in range of a configured network"
         fi
     else
         log_warning "No WiFi interface (wlan0) detected"
@@ -365,8 +362,9 @@ fi
     fi
     
     echo
-    return 0
+    log_info "WiFi will automatically connect on boot to any configured network"
 }
+
 
 create_directories() {
     echo
@@ -947,9 +945,6 @@ EOF
     log_success "Uninstall script created at $INSTALL_DIR/timelapse-uninstall"
 }
 
-########################################
-# SUMMARY
-########################################
 show_summary() {
     echo
     echo "╔═══════════════════════════════════════════════════════════╗"
@@ -960,6 +955,20 @@ show_summary() {
     echo
     log_success "System-level installation completed successfully"
     echo
+    
+    # Show WiFi status
+    if ip link show wlan0 &> /dev/null; then
+        echo "WiFi Status:"
+        current_ssid=$(iwgetid -r 2>/dev/null || echo "")
+        if [[ -n "$current_ssid" ]]; then
+            echo -e "  ${GREEN}✓${NC} Connected to: $current_ssid"
+            ip addr show wlan0 | grep "inet " | awk '{print "  IP Address: " $2}' || true
+        else
+            echo -e "  ${YELLOW}⚠${NC} Not currently connected"
+            echo "  WiFi will connect automatically when in range"
+        fi
+        echo
+    fi
     
     # Show Raspberry Pi Connect status
     if command -v rpi-connect &> /dev/null; then
@@ -994,7 +1003,6 @@ show_summary() {
     echo
     echo "Useful commands:"
     echo -e "  ${CYAN}timelapse setup${NC}          - Configure project"
-    echo -e "  ${CYAN}timelapse add-wifi${NC}       - Add WiFi network"
     echo -e "  ${CYAN}timelapse test-camera${NC}    - Test camera"
     echo -e "  ${CYAN}timelapse test-all${NC}       - Run all tests"
     echo -e "  ${CYAN}timelapse status${NC}         - Show status"
@@ -1002,6 +1010,7 @@ show_summary() {
     echo "To uninstall: sudo timelapse-uninstall"
     echo
 }
+
 
 
 ########################################
