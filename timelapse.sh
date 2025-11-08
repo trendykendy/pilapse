@@ -22,105 +22,6 @@ else
 fi
 
 # 
-# WiFi configuration handler (separate command)
-# 
-cmd_add_wifi() {
-  echo
-  echo "═══════════════════════════════════════════════════════"
-  echo "  ADD WIFI NETWORK"
-  echo "═══════════════════════════════════════════════════════"
-  echo
-  
-  configure_wifi
-  
-  exit 0
-}
-
-configure_wifi() {
-  # Check if wpa_supplicant.conf exists
-  WPA_CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
-  
-  if [[ ! -f "$WPA_CONF" ]]; then
-    # Create basic wpa_supplicant.conf if it doesn't exist
-    sudo bash -c "cat > '$WPA_CONF' <<EOF
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=IE
-
-EOF"
-    echo "Created new wpa_supplicant.conf"
-  fi
-  
-  # Show current networks
-  echo "Current WiFi networks:"
-  if grep -q "^network=" "$WPA_CONF"; then
-    grep "ssid=" "$WPA_CONF" | sed 's/.*ssid="\(.*\)".*/  - \1/'
-  else
-    echo "  (none configured)"
-  fi
-  echo
-  
-  # Add networks
-  while true; do
-    read -rp "WiFi SSID (or press Enter to finish): " wifi_ssid
-    
-    if [[ -z "$wifi_ssid" ]]; then
-      break
-    fi
-    
-    read -rsp "WiFi Password: " wifi_password
-    echo
-    
-    if [[ -z "$wifi_password" ]]; then
-      echo "Error: Password cannot be empty" >&2
-      continue
-    fi
-    
-    # Generate PSK using wpa_passphrase
-    echo "Adding network: $wifi_ssid"
-    
-    # Use wpa_passphrase to generate the encrypted PSK
-    wpa_passphrase "$wifi_ssid" "$wifi_password" | sudo tee -a "$WPA_CONF" > /dev/null
-    
-    echo "✓ Added: $wifi_ssid"
-    echo
-    
-    read -p "Add another WiFi network? (y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      break
-    fi
-  done
-  
-  # Show summary
-  echo
-  echo "WiFi networks configured:"
-  grep "ssid=" "$WPA_CONF" | sed 's/.*ssid="\(.*\)".*/  - \1/'
-  echo
-  
-  # Reconfigure WiFi
-  echo "Applying WiFi configuration..."
-  sudo wpa_cli -i wlan0 reconfigure > /dev/null 2>&1 || true
-  
-  echo "✓ WiFi configuration complete"
-  echo
-  
-  # Show current connection status
-  echo "Current WiFi status:"
-  if command -v iwgetid &> /dev/null; then
-    current_ssid=$(iwgetid -r)
-    if [[ -n "$current_ssid" ]]; then
-      echo "  Connected to: $current_ssid"
-      ip addr show wlan0 | grep "inet " | awk '{print "  IP Address: " $2}'
-    else
-      echo "  Not connected"
-      echo "  The Pi will connect to one of the configured networks on next boot"
-    fi
-  fi
-  echo
-}
-
-# 
 # change-interval handler
 # 
 cmd_interval() {
@@ -218,7 +119,7 @@ EOF
       # Use lsblk with pairs output for easier parsing
       mapfile -t devices < <(
         lsblk -ln -o NAME,LABEL -P \
-          | grep -E 'NAME="sd[a-z][0-9]+"' \
+          | grep 'NAME="sd[a-z][0-9]\+"' \
           | grep -v 'LABEL=""' \
           | while IFS= read -r line; do
               eval "$line"
@@ -282,7 +183,7 @@ EOF
   STOP_HOUR=${STOP_HOUR:-19}
 
   # Validate hours
-  if ! [[ "$START_HOUR" =~ ^([0-9]|1[0-9]|2[0-3])$ ]] || ! [[ "$STOP_HOUR" =~ ^([0-9]|1[0-9]|2[0-3])$ ]]; then
+  if ! [[ "$START_HOUR" =~ ^([0-1]?[0-9]|2[0-3])$ ]] || ! [[ "$STOP_HOUR" =~ ^([0-1]?[0-9]|2[0-3])$ ]]; then
     echo "Error: Hours must be between 0 and 23" >&2
     exit 1
   fi
@@ -348,9 +249,7 @@ EOF"
   echo
   echo "✓ Saved config to $CONFIG_FILE"
 
-  # Calculate hour range for cron (e.g., "7-18" for 7 AM to 6 PM)
-  # We subtract 1 from STOP_HOUR because cron is inclusive
-  # So if you want to stop at 7 PM (19:00), last capture should be at 6:55 PM (18:55)
+  # Calculate hour range for cron
   CRON_STOP_HOUR=$((STOP_HOUR - 1))
   
   # install/update ALL cron jobs in single file
