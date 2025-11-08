@@ -368,9 +368,6 @@ fi
     return 0
 }
 
-########################################
-# DIRECTORY CREATION
-########################################
 create_directories() {
     echo
     log_info "═══════════════════════════════════════════════════════"
@@ -386,6 +383,7 @@ create_directories() {
         "$USER_HOME/logs"
         "/mnt/BackupArchive"
         "/root/.config/rclone"
+        "/var/lib/timelapse"  
     )
     
     for dir in "${dirs[@]}"; do
@@ -397,9 +395,16 @@ create_directories() {
     chown -R admin:admin "$USER_HOME/photos" "$USER_HOME/backups" \
         "$USER_HOME/thumbnails" "$USER_HOME/archive" "$USER_HOME/logs" 2>/dev/null || true
     
+    # Initialize counter file
+    if [[ ! -f "/var/lib/timelapse/counter.txt" ]]; then
+        echo "00001" > /var/lib/timelapse/counter.txt
+        chmod 644 /var/lib/timelapse/counter.txt
+    fi
+    
     echo
     log_success "Directory structure created"
 }
+
 
 ########################################
 # CONFIG FILE INSTALLATION

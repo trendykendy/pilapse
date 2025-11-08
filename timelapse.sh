@@ -52,7 +52,7 @@ SYNC_TIME=\"${SYNC_TIME:-22:00}\"
 MONTAGE_TIME=\"${MONTAGE_TIME:-23:00}\"
 CLEANUP_TIME=\"${CLEANUP_TIME:-00:00}\"
 EOF"
-  sudo chmod 600 "$CONFIG_FILE"
+  sudo chmod 644 "$CONFIG_FILE"
   echo "Updated /etc/timelapse.conf with INTERVAL_MINS=$NEW_INTERVAL"
 
   # Parse times into hour and minute for end-of-day tasks
@@ -326,7 +326,7 @@ THUMBNAIL_DIR="/home/admin/thumbnails"          # Folder for thumbnails
 REMOTE_FOLDER="Daily Photos"                    # Remote Google Drive folder with daily structure
 ARCHIVE_DIR="/home/admin/archive"               # Folder for archived backups (older than 30 days)
 DAILY_MONTAGE="/home/admin/daily_report_$DATE.jpg"   # Path for the daily thumbnail table
-LOG_FILE="/home/admin/logs/timelapse.log"       # Log file
+LOG_FILE="/var/log/timelapse.log"       # Log file
 VERBOSE=true                                    # Toggle verbose output
 SLACK_WEBHOOK="https://hooks.slack.com/services/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"
 # Rate limiting for Slack mentions
@@ -354,7 +354,7 @@ log() {
 }
 
 # Initialize the counter file if it doesn't exist
-COUNTER_FILE="/home/admin/counter.txt"
+COUNTER_FILE="/var/lib/timelapse/counter.txt"
 if [ ! -f "$COUNTER_FILE" ]; then
     echo "00001" > "$COUNTER_FILE"
 fi
