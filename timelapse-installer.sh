@@ -903,30 +903,27 @@ show_summary() {
     # Show Raspberry Pi Connect status
     if command -v rpi-connect &> /dev/null; then
         echo "Remote Access:"
-        if systemctl is-active --quiet rpi-connect; then
-            echo "  ${GREEN}✓${NC} Raspberry Pi Connect is running"
+        ACTUAL_USER="${SUDO_USER:-admin}"
+        if loginctl show-user "$ACTUAL_USER" 2>/dev/null | grep -q "Linger=yes"; then
+            echo -e "  ${GREEN}✓${NC} Raspberry Pi Connect Lite installed"
+            echo -e "  ${GREEN}✓${NC} User lingering enabled (works when logged out)"
+            echo -e "  ${CYAN}ℹ${NC}  Run as $ACTUAL_USER: ${YELLOW}rpi-connect on${NC} then ${YELLOW}rpi-connect signin${NC}"
             echo "  🌐 Access at: https://connect.raspberrypi.com"
-            
-            # Check lingering
-            ACTUAL_USER="${SUDO_USER:-admin}"
-            if loginctl show-user "$ACTUAL_USER" 2>/dev/null | grep -q "Linger=yes"; then
-                echo "  ${GREEN}✓${NC} Remote shell enabled (works when logged out)"
-            fi
         fi
         echo
     fi
     
     echo "What was installed:"
-    echo "  ${GREEN}✓${NC} System dependencies (gphoto2, rclone, msmtp, etc.)"
-    echo "  ${GREEN}✓${NC} WiFi networks configured"
-    echo "  ${GREEN}✓${NC} Raspberry Pi Connect (remote access)"
-    echo "  ${GREEN}✓${NC} Google Drive connection (rclone)"
-    echo "  ${GREEN}✓${NC} Email configuration (msmtp)"
-    echo "  ${GREEN}✓${NC} Timelapse script (/usr/local/bin/timelapse)"
-    echo "  ${GREEN}✓${NC} Directory structure"
+    echo -e "  ${GREEN}✓${NC} System dependencies (gphoto2, rclone, msmtp, etc.)"
+    echo -e "  ${GREEN}✓${NC} WiFi networks configured"
+    echo -e "  ${GREEN}✓${NC} Raspberry Pi Connect (remote access)"
+    echo -e "  ${GREEN}✓${NC} Google Drive connection (rclone)"
+    echo -e "  ${GREEN}✓${NC} Email configuration (msmtp)"
+    echo -e "  ${GREEN}✓${NC} Timelapse script (/usr/local/bin/timelapse)"
+    echo -e "  ${GREEN}✓${NC} Directory structure"
     echo
-    echo "${CYAN}NEXT STEP - Configure your project:${NC}"
-    echo "  ${YELLOW}sudo timelapse setup${NC}"
+    echo -e "${CYAN}NEXT STEP - Configure your project:${NC}"
+    echo -e "  ${YELLOW}sudo timelapse setup${NC}"
     echo
     echo "This will configure:"
     echo "  - USB backup drive"
@@ -935,15 +932,16 @@ show_summary() {
     echo "  - End-of-day tasks"
     echo
     echo "Useful commands:"
-    echo "  timelapse setup          - Configure project"
-    echo "  timelapse add-wifi       - Add WiFi network"
-    echo "  timelapse test-camera    - Test camera"
-    echo "  timelapse test-all       - Run all tests"
-    echo "  timelapse status         - Show status"
+    echo -e "  ${CYAN}timelapse setup${NC}          - Configure project"
+    echo -e "  ${CYAN}timelapse add-wifi${NC}       - Add WiFi network"
+    echo -e "  ${CYAN}timelapse test-camera${NC}    - Test camera"
+    echo -e "  ${CYAN}timelapse test-all${NC}       - Run all tests"
+    echo -e "  ${CYAN}timelapse status${NC}         - Show status"
     echo
     echo "To uninstall: sudo timelapse-uninstall"
     echo
 }
+
 
 ########################################
 # MAIN INSTALLATION FLOW
