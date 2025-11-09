@@ -1219,8 +1219,8 @@ send_daily_report() {
     local montage_path="$1"
     report_data=$(count_images_for_report)
     verbose_log "Sending daily report."
-    curl -X POST -H 'Content-type: application/json' \
-        --data '{"text":"Daily Report: '"$report_data"'"}' "$SLACK_WEBHOOK"
+    #curl -X POST -H 'Content-type: application/json' \
+    #    --data '{"text":"Daily Report: '"$report_data"'"}' "$SLACK_WEBHOOK"
     if [ $? -eq 0 ]; then
         verbose_log "Daily report sent successfully."
         log "Daily report sent."
