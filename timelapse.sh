@@ -916,7 +916,7 @@ upload_photo() {
         if [[ $? -ne 0 ]]; then
             verbose_log "Remote file not found: $remote_file_path"
             log "Error: Remote file not found for checksum verification: $photo_path"
-            notify_slack "<@U0RSCG38X> Upload verification failed: Remote file not found\nFile: $photo_filename"
+            notify_slack "Upload verification failed: Remote file not found\nFile: $photo_filename"
             return 1
         fi
 
@@ -929,11 +929,17 @@ upload_photo() {
         if [[ "$local_checksum" = "$remote_checksum" ]]; then
             verbose_log "Checksum match: File integrity verified for $photo_filename"
             log "Upload successful and verified: $photo_path"
+            
+            # Extract counter from filename and update Google Drive counter
+            local counter=$(extract_counter_from_filename "$photo_filename")
+            counter=$((10#$counter))
+            update_gdrive_counter "$counter"
+            
             return 0
         else
             verbose_log "Checksum mismatch: File may be corrupted. Local: $local_checksum, Remote: $remote_checksum"
             log "Error: Checksum mismatch for $photo_filename"
-            notify_slack "<@U0RSCG38X> Checksum mismatch for photo: $photo_filename\nLocal: $local_checksum\nRemote: $remote_checksum"
+            notify_slack "Checksum mismatch for photo: $photo_filename\nLocal: $local_checksum\nRemote: $remote_checksum"
             return 1
         fi
     else
@@ -946,12 +952,10 @@ upload_photo() {
             error_summary="Upload failed (exit code: $upload_result)"
         fi
         
-        notify_slack "<@U0RSCG38X> Upload failed for photo: $photo_filename\nError: $error_summary"
+        notify_slack "Upload failed for photo: $photo_filename\nError: $error_summary"
         return 1
     fi
 }
-
-
 
 # Backup photo locally with checksum verification
 backup_photo() {
