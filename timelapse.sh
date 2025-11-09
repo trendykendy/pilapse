@@ -2,6 +2,28 @@
 set -euo pipefail
 
 ########################################
+# 0.5) Log File Setup
+########################################
+# Ensure log file exists and is writable
+if [[ ! -f "$LOG_FILE" ]]; then
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE" 2>/dev/null || {
+        echo "ERROR: Cannot create log file: $LOG_FILE" >&2
+        LOG_FILE="/tmp/timelapse.log"
+        echo "WARNING: Using fallback log: $LOG_FILE" >&2
+        touch "$LOG_FILE"
+    }
+fi
+
+# Make sure log file is writable
+if [[ ! -w "$LOG_FILE" ]]; then
+    echo "ERROR: Log file not writable: $LOG_FILE" >&2
+    LOG_FILE="/tmp/timelapse.log"
+    echo "WARNING: Using fallback log: $LOG_FILE" >&2
+fi
+
+
+########################################
 # 1) CONFIG & SETUP HANDLER
 ########################################
 CONFIG_FILE="/etc/timelapse.conf"
@@ -350,7 +372,10 @@ fi
 
 # Helper function for logging
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    local message="[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+    echo "$message" >> "$LOG_FILE" 2>/dev/null || {
+        echo "$message" >&2  # If can't write to log, print to stderr
+    }
 }
 
 # Initialize the counter file if it doesn't exist
