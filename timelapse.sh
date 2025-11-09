@@ -125,7 +125,7 @@ EOF
     while :; do
       # Use lsblk with pairs output for easier parsing
       mapfile -t devices < <(
-        lsblk -ln -o NAME,LABEL -P \
+        lsblk -n -o NAME,LABEL -P \
           | grep 'NAME="sd[a-z][0-9]\+"' \
           | grep -v 'LABEL=""' \
           | while IFS= read -r line; do
