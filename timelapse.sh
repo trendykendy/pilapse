@@ -2,28 +2,6 @@
 set -euo pipefail
 
 ########################################
-# 0.5) Log File Setup
-########################################
-# Ensure log file exists and is writable
-if [[ ! -f "$LOG_FILE" ]]; then
-    mkdir -p "$(dirname "$LOG_FILE")"
-    touch "$LOG_FILE" 2>/dev/null || {
-        echo "ERROR: Cannot create log file: $LOG_FILE" >&2
-        LOG_FILE="/tmp/timelapse.log"
-        echo "WARNING: Using fallback log: $LOG_FILE" >&2
-        touch "$LOG_FILE"
-    }
-fi
-
-# Make sure log file is writable
-if [[ ! -w "$LOG_FILE" ]]; then
-    echo "ERROR: Log file not writable: $LOG_FILE" >&2
-    LOG_FILE="/tmp/timelapse.log"
-    echo "WARNING: Using fallback log: $LOG_FILE" >&2
-fi
-
-
-########################################
 # 1) CONFIG & SETUP HANDLER
 ########################################
 CONFIG_FILE="/etc/timelapse.conf"
@@ -368,6 +346,27 @@ if [[ -n "${USB_BACKUP_LABEL}" ]]; then
     fi
 else
     DEVICE=""
+fi
+
+########################################
+# 0.5) Log File Setup
+########################################
+# Ensure log file exists and is writable
+if [[ ! -f "$LOG_FILE" ]]; then
+    mkdir -p "$(dirname "$LOG_FILE")"
+    touch "$LOG_FILE" 2>/dev/null || {
+        echo "ERROR: Cannot create log file: $LOG_FILE" >&2
+        LOG_FILE="/tmp/timelapse.log"
+        echo "WARNING: Using fallback log: $LOG_FILE" >&2
+        touch "$LOG_FILE"
+    }
+fi
+
+# Make sure log file is writable
+if [[ ! -w "$LOG_FILE" ]]; then
+    echo "ERROR: Log file not writable: $LOG_FILE" >&2
+    LOG_FILE="/tmp/timelapse.log"
+    echo "WARNING: Using fallback log: $LOG_FILE" >&2
 fi
 
 # Helper function for logging
