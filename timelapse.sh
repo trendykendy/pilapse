@@ -471,16 +471,217 @@ log() {
 
 # Initialize the counter file if it doesn't exist
 COUNTER_FILE="/var/lib/timelapse/counter.txt"
-if [ ! -f "$COUNTER_FILE" ]; then
-    echo "00001" > "$COUNTER_FILE"
-fi
+COUNTER_BACKUP_FILE="/mnt/BackupArchive/timelapse_counter_backup.txt"
+GDRIVE_COUNTER_FILE="$GDRIVE_REMOTE:$PROJECT_NAME/.timelapse_counter.txt"
+
+# Function to initialize counter directory
+init_counter() {
+    if [ ! -d "/var/lib/timelapse" ]; then
+        sudo mkdir -p "/var/lib/timelapse"
+        sudo chmod 755 "/var/lib/timelapse"
+    fi
+    
+    if [ ! -f "$COUNTER_FILE" ]; then
+        echo "00001" > "$COUNTER_FILE"
+    fi
+}
+
+# Function to extract counter from filename
+extract_counter_from_filename() {
+    local filename="$1"
+    # Extract the counter part (before first underscore)
+    echo "$filename" | grep -oE '^[0-9]{5}' || echo "0"
+}
+
+# Function to update Google Drive counter
+update_gdrive_counter() {
+    local counter_value="$1"
+    local temp_file=$(mktemp)
+    
+    printf "%05d" "$counter_value" > "$temp_file"
+    
+    if rclone copyto "$temp_file" "$GDRIVE_COUNTER_FILE" 2>/dev/null; then
+        verbose_log "Updated Google Drive counter to: $counter_value"
+        log "Google Drive counter updated: $counter_value"
+    else
+        verbose_log "Failed to update Google Drive counter"
+        log "Warning: Failed to update Google Drive counter"
+    fi
+    
+    rm -f "$temp_file"
+}
+
+# Function to read Google Drive counter
+read_gdrive_counter() {
+    local temp_file=$(mktemp)
+    
+    if rclone copyto "$GDRIVE_COUNTER_FILE" "$temp_file" 2>/dev/null; then
+        local counter=$(cat "$temp_file" | tr -d '\n')
+        rm -f "$temp_file"
+        echo "$((10#$counter))"
+    else
+        rm -f "$temp_file"
+        echo "0"
+    fi
+}
+
+# Function to find highest counter from multiple sources
+find_highest_counter() {
+    local max_counter=0
+    local source="default"
+    
+    verbose_log "Searching for highest counter across all sources..."
+    
+    # 1. Check local counter file
+    if [ -f "$COUNTER_FILE" ]; then
+        local local_counter=$(cat "$COUNTER_FILE" | tr -d '\n')
+        local_counter=$((10#$local_counter))  # Convert to decimal, removing leading zeros
+        if [ "$local_counter" -gt "$max_counter" ]; then
+            max_counter=$local_counter
+            source="local_file"
+        fi
+        verbose_log "Local counter file: $local_counter"
+    fi
+    
+    # 2. Check USB backup counter file
+    if [[ -n "$DEVICE" ]] && [[ -b "$DEVICE" ]]; then
+        local usb_mounted=false
+        if ! mountpoint -q "$MOUNT_POINT"; then
+            mkdir -p "$MOUNT_POINT"
+            if mount "$DEVICE" "$MOUNT_POINT" 2>/dev/null; then
+                verbose_log "USB mounted for counter check"
+                usb_mounted=true
+            fi
+        fi
+        
+        if mountpoint -q "$MOUNT_POINT" && [ -f "$COUNTER_BACKUP_FILE" ]; then
+            local usb_counter=$(cat "$COUNTER_BACKUP_FILE" | tr -d '\n')
+            usb_counter=$((10#$usb_counter))
+            if [ "$usb_counter" -gt "$max_counter" ]; then
+                max_counter=$usb_counter
+                source="usb_backup"
+            fi
+            verbose_log "USB backup counter: $usb_counter"
+        fi
+        
+        # Unmount if we mounted it
+        if [ "$usb_mounted" = true ]; then
+            umount "$MOUNT_POINT" 2>/dev/null
+            verbose_log "USB unmounted after counter check"
+        fi
+    fi
+    
+    # 3. Check Google Drive counter file (fast!)
+    verbose_log "Checking Google Drive counter file..."
+    local gdrive_counter=$(read_gdrive_counter)
+    if [ "$gdrive_counter" -gt 0 ]; then
+        if [ "$gdrive_counter" -gt "$max_counter" ]; then
+            max_counter=$gdrive_counter
+            source="google_drive"
+        fi
+        verbose_log "Google Drive counter: $gdrive_counter"
+    else
+        verbose_log "No Google Drive counter found or connection failed"
+    fi
+    
+    # 4. Fallback: Check local backup folder for actual files (slower)
+    if [ "$max_counter" -eq 0 ]; then
+        verbose_log "No counters found, scanning local backup files as fallback..."
+        local backup_highest=$(find "$BACKUP_DIR" -type f -name "[0-9][0-9][0-9][0-9][0-9]_*.jpg" 2>/dev/null | \
+            while read -r file; do
+                extract_counter_from_filename "$(basename "$file")"
+            done | sort -rn | head -1)
+        
+        if [ -n "$backup_highest" ]; then
+            local backup_counter=$((10#$backup_highest))
+            if [ "$backup_counter" -gt "$max_counter" ]; then
+                max_counter=$backup_counter
+                source="local_backup_files"
+            fi
+            verbose_log "Highest local backup counter: $backup_counter"
+        fi
+    fi
+    
+    # 5. Fallback: Check local photos folder (slower)
+    if [ "$max_counter" -eq 0 ]; then
+        verbose_log "No counters found, scanning local photo files as fallback..."
+        local photo_highest=$(find "$PHOTO_DIR" -type f -name "[0-9][0-9][0-9][0-9][0-9]_*.jpg" 2>/dev/null | \
+            while read -r file; do
+                extract_counter_from_filename "$(basename "$file")"
+            done | sort -rn | head -1)
+        
+        if [ -n "$photo_highest" ]; then
+            local photo_counter=$((10#$photo_highest))
+            if [ "$photo_counter" -gt "$max_counter" ]; then
+                max_counter=$photo_counter
+                source="local_photo_files"
+            fi
+            verbose_log "Highest local photo counter: $photo_counter"
+        fi
+    fi
+    
+    verbose_log "Highest counter found: $max_counter (source: $source)"
+    log "Counter recovered from $source: $max_counter"
+    
+    # If we found a counter from files but not from counter files, initialize the counter files
+    if [ "$max_counter" -gt 0 ] && [ "$source" != "local_file" ] && [ "$source" != "usb_backup" ] && [ "$source" != "google_drive" ]; then
+        verbose_log "Initializing counter files with recovered value: $max_counter"
+        printf "%05d" "$max_counter" > "$COUNTER_FILE"
+        update_gdrive_counter "$max_counter"
+    fi
+    
+    echo "$max_counter"
+}
 
 # Function to get and increment the counter
 get_next_counter() {
-    COUNTER=$(cat "$COUNTER_FILE")
-    printf "%05d" "$COUNTER" # Format as a 5-digit number
-    echo $((COUNTER + 1)) > "$COUNTER_FILE"
+    # Initialize if needed
+    init_counter
+    
+    # Find the highest counter from all sources
+    local highest=$(find_highest_counter)
+    
+    # Get current counter from file
+    local current=$(cat "$COUNTER_FILE" | tr -d '\n')
+    current=$((10#$current))
+    
+    # Use whichever is higher
+    if [ "$highest" -gt "$current" ]; then
+        verbose_log "Counter mismatch detected. Local: $current, Highest found: $highest. Using highest."
+        log "Counter recovered: was $current, now using $highest"
+        current=$highest
+    fi
+    
+    # Increment for next photo
+    local next=$((current + 1))
+    
+    # Save the incremented counter locally
+    printf "%05d" "$next" > "$COUNTER_FILE"
+    
+    # Backup to USB if available
+    if [[ -n "$DEVICE" ]] && [[ -b "$DEVICE" ]]; then
+        local usb_mounted=false
+        if ! mountpoint -q "$MOUNT_POINT"; then
+            mkdir -p "$MOUNT_POINT"
+            if mount "$DEVICE" "$MOUNT_POINT" 2>/dev/null; then
+                usb_mounted=true
+            fi
+        fi
+        
+        if mountpoint -q "$MOUNT_POINT"; then
+            printf "%05d" "$next" > "$COUNTER_BACKUP_FILE" 2>/dev/null
+            verbose_log "Counter backed up to USB"
+        fi
+        
+        if [ "$usb_mounted" = true ]; then
+            umount "$MOUNT_POINT" 2>/dev/null
+        fi
+    fi
+    
+    # Return current counter (before increment)
+    printf "%05d" "$current"
 }
+
 
 generate_filename() {
     COUNTER=$(get_next_counter) # Get the next counter value
