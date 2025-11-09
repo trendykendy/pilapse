@@ -328,7 +328,8 @@ ARCHIVE_DIR="/home/admin/archive"               # Folder for archived backups (o
 DAILY_MONTAGE="/home/admin/daily_report_$DATE.jpg"   # Path for the daily thumbnail table
 LOG_FILE="/var/log/timelapse.log"       # Log file
 VERBOSE=true                                    # Toggle verbose output
-SLACK_WEBHOOK="https://hooks.slack.com/services/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"
+SLACK_WEBHOOK="https://hooks.slack.com/services/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"
+SLACK_USER_ID="U0RSCG38X"
 # Rate limiting for Slack mentions
 MENTION_COOLDOWN_FILE="/tmp/timelapse_mention_cooldown_${PROJECT_NAME// /_}"
 MENTION_COOLDOWN_SECONDS=3600  # 1 hour
@@ -352,30 +353,48 @@ fi
 # 0.5) Log File Setup
 ########################################
 # Ensure log file exists and is writable
-if [[ ! -f "$LOG_FILE" ]]; then
-    mkdir -p "$(dirname "$LOG_FILE")"
-    touch "$LOG_FILE" 2>/dev/null || {
-        echo "ERROR: Cannot create log file: $LOG_FILE" >&2
-        LOG_FILE="/tmp/timelapse.log"
+ensure_log_file() {
+    # Try to create/access the main log file
+    if [[ ! -f "$LOG_FILE" ]]; then
+        mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+        touch "$LOG_FILE" 2>/dev/null || {
+            echo "WARNING: Cannot create log file: $LOG_FILE" >&2
+            LOG_FILE="/tmp/timelapse_$(date +%Y%m%d).log"
+            echo "WARNING: Using fallback log: $LOG_FILE" >&2
+            touch "$LOG_FILE" 2>/dev/null || {
+                echo "ERROR: Cannot create fallback log file" >&2
+                LOG_FILE="/dev/null"
+            }
+        }
+    fi
+
+    # Make sure log file is writable
+    if [[ ! -w "$LOG_FILE" ]] && [[ "$LOG_FILE" != "/dev/null" ]]; then
+        echo "WARNING: Log file not writable: $LOG_FILE" >&2
+        LOG_FILE="/tmp/timelapse_$(date +%Y%m%d).log"
         echo "WARNING: Using fallback log: $LOG_FILE" >&2
-        touch "$LOG_FILE"
-    }
-fi
+        touch "$LOG_FILE" 2>/dev/null || {
+            echo "ERROR: Cannot create fallback log file" >&2
+            LOG_FILE="/dev/null"
+        }
+    fi
+}
 
-# Make sure log file is writable
-if [[ ! -w "$LOG_FILE" ]]; then
-    echo "ERROR: Log file not writable: $LOG_FILE" >&2
-    LOG_FILE="/tmp/timelapse.log"
-    echo "WARNING: Using fallback log: $LOG_FILE" >&2
-fi
+# Call this before any logging
+ensure_log_file
 
-# Helper function for logging
+# Helper function for logging with fallback
 log() {
     local message="[$(date +'%Y-%m-%d %H:%M:%S')] $1"
     echo "$message" >> "$LOG_FILE" 2>/dev/null || {
         echo "$message" >&2  # If can't write to log, print to stderr
+        # Also try to notify via Slack if logging completely fails
+        if [[ "$LOG_FILE" == "/dev/null" ]]; then
+            notify_slack "⚠️ Logging system failure - using stderr only" "true" 2>/dev/null || true
+        fi
     }
 }
+
 
 # Initialize the counter file if it doesn't exist
 COUNTER_FILE="/var/lib/timelapse/counter.txt"
@@ -410,9 +429,14 @@ notify_slack() {
     local force_mention="${2:-false}"  # Optional parameter to force mention
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     
+    # Debug logging
+    verbose_log "notify_slack called with message: $message"
+    log "Attempting to send Slack notification"
+    
     # Check if we should mention the user
     local mention=""
     if [[ -n "${SLACK_USER_ID:-}" ]]; then
+        verbose_log "SLACK_USER_ID is set: $SLACK_USER_ID"
         local should_mention=false
         
         # Force mention if explicitly requested
@@ -424,6 +448,8 @@ notify_slack() {
                 local last_mention=$(cat "$MENTION_COOLDOWN_FILE")
                 local current_time=$(date +%s)
                 local time_diff=$((current_time - last_mention))
+                
+                verbose_log "Cooldown check: last=$last_mention, current=$current_time, diff=$time_diff"
                 
                 if [[ $time_diff -ge $MENTION_COOLDOWN_SECONDS ]]; then
                     should_mention=true
@@ -439,17 +465,34 @@ notify_slack() {
             mention="<@${SLACK_USER_ID}> "
             # Update cooldown file
             date +%s > "$MENTION_COOLDOWN_FILE"
+            verbose_log "Adding mention to message"
         else
             # Still indicate it's an alert, just don't ping
             mention="🔔 "
+            verbose_log "Using bell emoji (cooldown active)"
         fi
+    else
+        verbose_log "SLACK_USER_ID not set"
     fi
     
     local full_message="*[${PROJECT_NAME}]* ${timestamp}\n${mention}${message}"
     
-    curl -X POST -H 'Content-type: application/json' \
-        --data '{"text":"'"$full_message"'"}' "$SLACK_WEBHOOK" 2>/dev/null
+    verbose_log "Sending to Slack: $full_message"
+    
+    local response=$(curl -X POST -H 'Content-type: application/json' \
+        --data '{"text":"'"$full_message"'"}' "$SLACK_WEBHOOK" 2>&1)
+    
+    local curl_exit=$?
+    
+    if [[ $curl_exit -eq 0 ]]; then
+        verbose_log "Slack notification sent successfully. Response: $response"
+        log "Slack notification sent"
+    else
+        verbose_log "Slack notification failed. Exit code: $curl_exit, Response: $response"
+        log "ERROR: Slack notification failed with exit code $curl_exit"
+    fi
 }
+
 
 
 # Helper function to send email with attachment using msmtp
@@ -503,66 +546,49 @@ take_photo() {
     local photo_path="$base_folder/$photo_filename"
 
     verbose_log "Attempting to capture photo: $photo_path"
+    log "Attempting to capture photo: $photo_path"
 
     # Function to attempt capturing the photo with timeout
     capture_with_timeout() {
-        local error_log=$(mktemp)
-        timeout 30 gphoto2 --capture-image-and-download --filename "$photo_path" 2>"$error_log"
-        local result=$?
-        local error_msg=$(cat "$error_log")
-        rm -f "$error_log"
-        
-        # Return both exit code and error message
-        if [[ $result -eq 0 ]]; then
-            return 0
-        else
-            echo "$error_msg"
-            return 1
-        fi
+        timeout 30 gphoto2 --capture-image-and-download --filename "$photo_path"
     }
 
     # First attempt
-    local error_output
-    error_output=$(capture_with_timeout)
-    local capture_result=$?
-    
-    if [[ $capture_result -eq 0 ]] && [[ -f "$photo_path" ]]; then
-        verbose_log "Photo captured successfully: $photo_path"
-        log "Photo captured: $photo_path"
-        process_photo "$photo_path"
-        return 0
-    else
-        verbose_log "Photo capture failed: File not created."
-        log "Photo capture failed: File not created."
-        
-        if [[ -n "$error_output" ]]; then
-            verbose_log "gphoto2 error: $error_output"
-            log "gphoto2 error: $error_output"
+    if capture_with_timeout; then
+        if [ -f "$photo_path" ]; then
+            verbose_log "Photo captured successfully: $photo_path"
+            log "Photo captured: $photo_path"
+            process_photo "$photo_path"
+            return 0
+        else
+            verbose_log "Photo capture failed: File not created."
+            log "Photo capture failed: File not created."
         fi
+    else
+        verbose_log "Photo capture timed out or failed."
+        log "Photo capture timed out or failed."
     fi
 
     # Retry after failure or timeout
     verbose_log "Retrying photo capture in 10 seconds..."
+    log "Retrying photo capture in 10 seconds..."
     sleep 10
 
-    error_output=$(capture_with_timeout)
-    capture_result=$?
-    
-    if [[ $capture_result -eq 0 ]] && [[ -f "$photo_path" ]]; then
-        verbose_log "Photo captured successfully on retry: $photo_path"
-        log "Photo captured on retry: $photo_path"
-        process_photo "$photo_path"
-        return 0
-    else
-        verbose_log "Photo capture failed on retry: File not created."
-        log "Photo capture failed on retry: File not created."
-        
-        # Send detailed error to Slack
-        local error_details="Photo capture failed after retry"
-        if [[ -n "$error_output" ]]; then
-            error_details="${error_details}\nError: ${error_output}"
+    if capture_with_timeout; then
+        if [ -f "$photo_path" ]; then
+            verbose_log "Photo captured successfully on retry: $photo_path"
+            log "Photo captured on retry: $photo_path"
+            process_photo "$photo_path"
+            return 0
+        else
+            verbose_log "Photo capture failed on retry: File not created."
+            log "Photo capture failed on retry: File not created."
+            notify_slack "🚨 *Photo Capture Failed* (after retry)\nProject: ${PROJECT_NAME}\nTime: $(date '+%Y-%m-%d %H:%M:%S')\nFile not created: \`${photo_filename}\`"
         fi
-        notify_slack "<@U0RSCG38X> ${error_details}"
+    else
+        verbose_log "Photo capture timed out on retry."
+        log "Photo capture timed out on retry."
+        notify_slack "🚨 *Photo Capture Timed Out* (after retry)\nProject: ${PROJECT_NAME}\nTime: $(date '+%Y-%m-%d %H:%M:%S')\nExpected file: \`${photo_filename}\`"
     fi
 
     verbose_log "All attempts to capture the photo have failed."
@@ -776,40 +802,68 @@ end_of_day_sync() {
 
     # Populate remote files list
     verbose_log "Fetching file list from remote folder: $remote_folder_path"
-    remote_files_list=$(rclone lsf "$remote_folder_path" || echo "")
-    total_remote_files=$(echo "$remote_files_list" | wc -l) # Count total files on remote
+    remote_files_list=$(rclone lsf "$remote_folder_path" 2>/dev/null || echo "")
+    
+    # Count only jpg files on remote
+    if [[ -n "$remote_files_list" ]]; then
+        total_remote_files=$(echo "$remote_files_list" | grep -c "\.jpg$" || echo "0")
+    else
+        total_remote_files=0
+    fi
 
     # Check if backup folder exists
     if [ ! -d "$backup_folder_path" ]; then
         verbose_log "No backup folder found for today at $backup_folder_path. Skipping sync."
         log "No backup folder found for today at $backup_folder_path. Skipping sync."
-        notify_slack "No backup folder found for today ($DATE). End-of-Day Sync skipped."
+        notify_slack "📁 No backup folder found for today ($DATE). End-of-Day Sync skipped."
         return
     fi
 
-    # Iterate through local backup files
-    for file in "$backup_folder_path"/*; do
-        if [ -f "$file" ]; then
-            local_total_files=$((local_total_files + 1))
-            file_name=$(basename "$file")
+    # Count local files before sync
+    local_total_files=$(find "$backup_folder_path" -type f -name "*.jpg" 2>/dev/null | wc -l)
+    
+    # Count how many local files are already on remote
+    if [[ -n "$remote_files_list" ]]; then
+        for file in "$backup_folder_path"/*.jpg; do
+            if [ -f "$file" ]; then
+                file_name=$(basename "$file")
+                if echo "$remote_files_list" | grep -q "^$file_name$"; then
+                    remote_files_present=$((remote_files_present + 1))
+                fi
+            fi
+        done
+    fi
 
-            # Check if file exists on remote
-            if echo "$remote_files_list" | grep -q "^$file_name$"; then
-                remote_files_present=$((remote_files_present + 1))
+    verbose_log "Before sync - Local: $local_total_files, Remote: $total_remote_files, Already synced: $remote_files_present"
+
+    # Iterate through local backup files to upload missing ones
+    for file in "$backup_folder_path"/*.jpg; do
+        # Check if glob matched any files
+        if [ ! -f "$file" ]; then
+            continue
+        fi
+        
+        file_name=$(basename "$file")
+
+        # Check if file exists on remote
+        if [[ -n "$remote_files_list" ]] && echo "$remote_files_list" | grep -q "^$file_name$"; then
+            # Already on remote, skip
+            continue
+        else
+            # Attempt to upload missing file
+            verbose_log "Uploading missing file: $file"
+            if rclone copy "$file" "$remote_folder_path" --low-level-retries 3 --retries 3 --progress 2>/dev/null; then
+                successful_uploads=$((successful_uploads + 1))
+                verbose_log "Successfully uploaded: $file"
+                log "Successfully uploaded: $file"
             else
-                # Attempt to upload missing file
-                verbose_log "Uploading missing file: $file"
-                if rclone copy "$file" "$remote_folder_path" --low-level-retries 3 --retries 3 --progress; then
-                    successful_uploads=$((successful_uploads + 1))
-                    verbose_log "Successfully uploaded: $file"
-                    log "Successfully uploaded: $file"
-                else
-                    failed_uploads=$((failed_uploads + 1))
-                    verbose_log "Failed to upload: $file"
-                    log "Upload failed for file: $file"
+                failed_uploads=$((failed_uploads + 1))
+                verbose_log "Failed to upload: $file"
+                log "Upload failed for file: $file"
 
-                    # Move file to failed uploads folder
-                    mv "$file" "$failed_uploads_folder" && verbose_log "Moved failed file to: $failed_uploads_folder"
+                # Move file to failed uploads folder
+                if mv "$file" "$failed_uploads_folder" 2>/dev/null; then
+                    verbose_log "Moved failed file to: $failed_uploads_folder"
                 fi
             fi
         fi
@@ -817,7 +871,7 @@ end_of_day_sync() {
 
     # Copy the logs to Google Drive
     verbose_log "Copying logs to remote Google Drive folder: $logs_remote_folder"
-    if rclone copy "$logs_folder" "$logs_remote_folder" --progress; then
+    if rclone copy "$logs_folder" "$logs_remote_folder" --progress 2>/dev/null; then
         verbose_log "Successfully copied logs to Google Drive."
         log "Successfully copied logs to Google Drive."
     else
@@ -831,27 +885,88 @@ end_of_day_sync() {
     fi
     touch "$LOG_FILE"
 
+    # ===== VERIFY FINAL STATE =====
+    verbose_log "Verifying final state..."
+    
+    # Re-fetch remote file list to get actual final count
+    local final_remote_files_list=$(rclone lsf "$remote_folder_path" 2>/dev/null || echo "")
+    local final_remote_total=0
+    if [[ -n "$final_remote_files_list" ]]; then
+        final_remote_total=$(echo "$final_remote_files_list" | grep -c "\.jpg$" || echo "0")
+    fi
+    
+    # Count remaining local files
+    local final_local_total=$(find "$backup_folder_path" -type f -name "*.jpg" 2>/dev/null | wc -l)
+    
+    # Verify each uploaded file actually exists on remote
+    local verified_uploads=0
+    local unverified_uploads=0
+    
+    if [ "$successful_uploads" -gt 0 ]; then
+        verbose_log "Verifying uploaded files exist on remote..."
+        # We need to track which files we uploaded - let's check the log
+        # For now, we'll trust the upload count if final remote count increased appropriately
+        local expected_remote_total=$((total_remote_files + successful_uploads))
+        if [ "$final_remote_total" -eq "$expected_remote_total" ]; then
+            verified_uploads=$successful_uploads
+            verbose_log "✓ All uploads verified on remote"
+        else
+            verbose_log "⚠ Warning: Remote file count mismatch. Expected: $expected_remote_total, Actual: $final_remote_total"
+            unverified_uploads=$successful_uploads
+        fi
+    fi
+    
     # Generate the summary report
     verbose_log "End-of-Day Sync Summary:"
-    verbose_log "Total files in local backup: $local_total_files"
-    verbose_log "Total files in remote folder: $total_remote_files"
-    verbose_log "Files already on remote: $remote_files_present"
+    verbose_log "Initial state - Local: $local_total_files, Remote: $total_remote_files"
+    verbose_log "Files already synced: $remote_files_present"
     verbose_log "Files successfully uploaded: $successful_uploads"
     verbose_log "Files failed to upload: $failed_uploads"
+    verbose_log "Final state (verified) - Local: $final_local_total, Remote: $final_remote_total"
 
     log "End-of-Day Sync Summary:"
-    log "Total files in local backup: $local_total_files"
-    log "Total files in remote folder: $total_remote_files"
-    log "Files already on remote: $remote_files_present"
+    log "Initial state - Local: $local_total_files, Remote: $total_remote_files"
+    log "Files already synced: $remote_files_present"
     log "Files successfully uploaded: $successful_uploads"
     log "Files failed to upload: $failed_uploads"
+    log "Final state (verified) - Local: $final_local_total, Remote: $final_remote_total"
 
-    # Notify via Slack
-    if [ "$failed_uploads" -gt 0 ]; then
-        notify_slack "End-of-Day Sync Summary:\nTotal files in local backup: $local_total_files\nTotal files in remote folder: $total_remote_files\nFiles already on remote: $remote_files_present\nFiles successfully uploaded: $successful_uploads\nFiles failed to upload: $failed_uploads\nFailed files moved to: $failed_uploads_folder"
-    else
-        notify_slack "End-of-Day Sync Summary:\nTotal files in local backup: $local_total_files\nTotal files in remote folder: $total_remote_files\nFiles already on remote: $remote_files_present\nFiles successfully uploaded: $successful_uploads\nFiles failed to upload: $failed_uploads"
+    # Build Slack message with verified data
+    local slack_message="📊 *End-of-Day Sync Report* - $DATE\n\n"
+    slack_message+="*Initial Status:*\n"
+    slack_message+="💾 Local backup: $local_total_files images\n"
+    slack_message+="☁️ Google Drive: $total_remote_files images\n"
+    slack_message+="✓ Already synced: $remote_files_present images\n\n"
+    
+    slack_message+="*Sync Activity:*\n"
+    if [ "$successful_uploads" -gt 0 ]; then
+        if [ "$unverified_uploads" -gt 0 ]; then
+            slack_message+="⚠️ Uploaded: $successful_uploads images (verification mismatch)\n"
+        else
+            slack_message+="⬆️ Uploaded: $successful_uploads images ✅\n"
+        fi
     fi
+    if [ "$failed_uploads" -gt 0 ]; then
+        slack_message+="❌ Failed: $failed_uploads images (moved to USB backup)\n"
+    fi
+    if [ "$successful_uploads" -eq 0 ] && [ "$failed_uploads" -eq 0 ]; then
+        slack_message+="✓ All files already synced - no action needed\n"
+    fi
+    
+    slack_message+="\n*Final Status (Verified):*\n"
+    slack_message+="💾 Local backup: $final_local_total images\n"
+    slack_message+="☁️ Google Drive: $final_remote_total images"
+    
+    if [ "$failed_uploads" -gt 0 ]; then
+        slack_message+="\n\n⚠️ $failed_uploads files moved to USB backup folder"
+    fi
+    
+    if [ "$unverified_uploads" -gt 0 ]; then
+        slack_message+="\n\n⚠️ Warning: Remote file count doesn't match expected value"
+    fi
+
+    # Notify via Slack with verified data
+    notify_slack "$slack_message"
 
     verbose_log "End-of-Day Sync for $DATE completed."
     log "End-of-Day Sync for $DATE completed."
@@ -963,44 +1078,56 @@ create_daily_montage() {
     }
 
     # Upload the renamed daily montage to Google Drive with the correct filename
-    rclone copyto "$renamed_montage_path" "$remote_file_path" --progress || {
+    if rclone copyto "$renamed_montage_path" "$remote_file_path" --progress; then
+        verbose_log "Daily montage uploaded to Google Drive: $remote_file_path"
+        log "Daily montage uploaded to Google Drive: $remote_file_path"
+        
+        # Clean up: remove the renamed local file after successful upload
+        rm "$renamed_montage_path" || {
+            verbose_log "Failed to remove renamed local file."
+            log "Failed to remove renamed local file."
+            notify_slack "Failed to remove renamed local file."
+        }
+    else
         verbose_log "Failed to upload daily montage to Google Drive."
         log "Failed to upload daily montage to Google Drive."
 
-        if ! mountpoint -q "$MOUNT_POINT"; then
-            mkdir -p "$MOUNT_POINT"
-            if ! mount "$DEVICE" "$MOUNT_POINT"; then
-                log "ERROR: failed to mount $DEVICE at $MOUNT_POINT"
-                notify_slack "Timelapse ERROR: USB backup mount failed."
-                exit 1
+        # Try to save to USB backup if available
+        if [[ -n "$DEVICE" ]] && [[ -b "$DEVICE" ]]; then
+            verbose_log "USB device detected, attempting to mount and backup montage"
+            
+            if ! mountpoint -q "$MOUNT_POINT"; then
+                mkdir -p "$MOUNT_POINT"
+                if mount "$DEVICE" "$MOUNT_POINT" 2>/dev/null; then
+                    verbose_log "USB mounted successfully"
+                    local usb_backup_folder="$MOUNT_POINT/Daily Reviews/$month"
+                    mkdir -p "$usb_backup_folder"
+                    
+                    if mv "$renamed_montage_path" "$usb_backup_folder"; then
+                        verbose_log "Moved failed daily montage to USB backup folder: $usb_backup_folder"
+                        log "Moved failed daily montage to USB backup folder: $usb_backup_folder"
+                        notify_slack "Daily montage upload to Google Drive failed, saved to USB backup instead"
+                    else
+                        verbose_log "Failed to move daily montage to USB backup folder."
+                        log "Failed to move daily montage to USB backup folder."
+                        notify_slack "Failed to upload daily montage to Google Drive AND failed to save to USB backup"
+                    fi
+                    
+                    umount "$MOUNT_POINT" 2>/dev/null
+                else
+                    verbose_log "Failed to mount USB device"
+                    log "Failed to mount USB device"
+                    notify_slack "Daily montage upload failed and USB mount failed. File kept at: $renamed_montage_path"
+                fi
             fi
+        else
+            verbose_log "No USB device available for backup. File kept at: $renamed_montage_path"
+            log "No USB device available for backup. File kept at: $renamed_montage_path"
+            notify_slack "Daily montage upload failed and no USB backup available. File kept at: $renamed_montage_path"
         fi
-
-        # If Google Drive upload fails, move the file to USB backup folder
-        local usb_backup_folder="/mnt/BackupArchive/Daily Reviews/$month"
-        mkdir -p "$usb_backup_folder"
-        mv "$renamed_montage_path" "$usb_backup_folder" && {
-            verbose_log "Moved failed daily montage to USB backup folder: $usb_backup_folder"
-            log "Moved failed daily montage to USB backup folder: $usb_backup_folder"
-        } || {
-            verbose_log "Failed to move daily montage to USB backup folder."
-            log "Failed to move daily montage to USB backup folder."
-            notify_slack "Failed to move daily montage to USB backup folder."
-        }
+        
         return
-    }
-
-    umount "$MOUNT_POINT"
-
-    # Clean up: remove the renamed local file after successful upload
-    rm "$renamed_montage_path" || {
-        verbose_log "Failed to remove renamed local file."
-        log "Failed to remove renamed local file."
-        notify_slack "Failed to remove renamed local file."
-    }
-
-    verbose_log "Daily montage uploaded to Google Drive: $remote_file_path"
-    log "Daily montage uploaded to Google Drive: $remote_file_path"
+    fi
 
     # Clear the thumbnails and the folder for the day
     rm -rf "$thumbnail_dir" || {
@@ -1012,6 +1139,7 @@ create_daily_montage() {
     verbose_log "Thumbnails for the day cleared."
     log "Thumbnails for the day cleared."
 }
+
 
 # Send daily report via Slack
 send_daily_report() {
@@ -1029,17 +1157,8 @@ send_daily_report() {
     fi
 }
 
+# Function to count images for the end-of-day report
 count_images_for_report() {
-    # 1) Mount if needed
-    if ! mountpoint -q "$MOUNT_POINT"; then
-        mkdir -p "$MOUNT_POINT"
-        if ! mount "$DEVICE" "$MOUNT_POINT"; then
-            log "ERROR: failed to mount $DEVICE at $MOUNT_POINT"
-            notify_slack "Timelapse ERROR: USB backup mount failed."
-            exit 1
-        fi
-    fi
-
     # Define Google Drive folder and USB backup folder paths
     local google_drive_folder="$GDRIVE_REMOTE:$PROJECT_NAME/Daily Photos/$CURRENT_MONTH/$DATE"
     local usb_backup_folder="/mnt/BackupArchive/$DATE"
@@ -1049,20 +1168,52 @@ count_images_for_report() {
     local usb_backup_count=0
     
     # Count images in the Google Drive folder using rclone (all .jpg files)
-    google_drive_count=$(rclone lsf "$google_drive_folder" --files-only --include "*.jpg" | wc -l)
+    google_drive_count=$(rclone lsf "$google_drive_folder" --files-only --include "*.jpg" 2>/dev/null | wc -l)
     
-    # Check if USB backup folder exists and count images there
-    if [ -d "$usb_backup_folder" ]; then
-        usb_backup_count=$(find "$usb_backup_folder" -type f -name "*.jpg" | wc -l)
+    # Only check USB if device exists and can be mounted
+    if [[ -n "$DEVICE" ]] && [[ -b "$DEVICE" ]]; then
+        # Check if already mounted
+        local was_mounted=false
+        if mountpoint -q "$MOUNT_POINT"; then
+            was_mounted=true
+            verbose_log "USB already mounted"
+        else
+            # Try to mount
+            mkdir -p "$MOUNT_POINT"
+            if mount "$DEVICE" "$MOUNT_POINT" 2>/dev/null; then
+                verbose_log "USB mounted for image count"
+            else
+                verbose_log "Failed to mount USB for image count"
+                log "Failed to mount USB device for image count"
+                # Continue without USB count
+                echo "Images for today on Google Drive: $google_drive_count, Images for today on USB Backup: N/A (USB not available)"
+                return
+            fi
+        fi
+        
+        # Check if USB backup folder exists and count images there
+        if [ -d "$usb_backup_folder" ]; then
+            usb_backup_count=$(find "$usb_backup_folder" -type f -name "*.jpg" 2>/dev/null | wc -l)
+        else
+            usb_backup_count=0
+        fi
+        
+        # Unmount only if we mounted it
+        if [[ "$was_mounted" == "false" ]]; then
+            umount "$MOUNT_POINT" 2>/dev/null
+            verbose_log "USB unmounted after image count"
+        fi
     else
-        usb_backup_count=0
+        verbose_log "USB device not available for image count"
+        # Return count without USB
+        echo "Images for today on Google Drive: $google_drive_count, Images for today on USB Backup: N/A (USB not available)"
+        return
     fi
     
     # Format the result as a string to pass to the send email or report functions
     echo "Images for today on Google Drive: $google_drive_count, Images for today on USB Backup: $usb_backup_count"
-
-    umount "$MOUNT_POINT"
 }
+
 
 cleanup_directories() {
     # Define the directories to clean up
