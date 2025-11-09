@@ -2020,9 +2020,9 @@ case "${1:-}" in
         sudo cp /tmp/timelapse-new /usr/local/bin/timelapse
         sudo chmod +x /usr/local/bin/timelapse
         rm /tmp/timelapse-new
-        log_success "Updated to latest version"
+        verbose_log "Updated to latest version"
     else
-        log_error "Update failed"
+        verbose_log "Update failed"
     fi
     ;;
 
