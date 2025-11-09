@@ -1585,7 +1585,7 @@ case "${1:-}" in
     test_all
     ;;
   update)
-    log_info "Updating timelapse script from GitHub..."
+    verbose_log "Updating timelapse script to latest version."
     curl -fsSL https://raw.githubusercontent.com/trendykendy/pilapse/main/timelapse.sh -o /tmp/timelapse-new
     if [[ -s /tmp/timelapse-new ]]; then
         sudo cp /tmp/timelapse-new /usr/local/bin/timelapse
