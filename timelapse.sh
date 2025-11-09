@@ -87,13 +87,20 @@ cmd_setup() {
       --project)     PROJECT_NAME="$2";     shift 2 ;;
       --usb-label)   USB_BACKUP_LABEL="$2"; shift 2 ;;
       --interval)    INTERVAL_MINS="$2";    shift 2 ;;  # in minutes
+      --email)       EMAIL_RECIPIENTS="$2"; shift 2 ;;
+      --slack-webhook) SLACK_WEBHOOK="$2";  shift 2 ;;
+      --slack-user)  SLACK_USER_ID="$2";    shift 2 ;;
       -h|--help)
         cat <<EOF
 Usage: timelapse setup [--project NAME] [--usb-label LABEL] [--interval MINUTES]
+                       [--email RECIPIENTS] [--slack-webhook URL] [--slack-user ID]
 
-  --project     : name of this timelapse project
-  --usb-label   : filesystem label of your USB backup drive
-  --interval    : how often (in minutes) to run 'timelapse capture'
+  --project       : name of this timelapse project
+  --usb-label     : filesystem label of your USB backup drive
+  --interval      : how often (in minutes) to run 'timelapse capture'
+  --email         : email recipients (space-separated)
+  --slack-webhook : Slack webhook URL for notifications
+  --slack-user    : Slack user ID for mentions
 EOF
         exit 0 ;;
       *)
@@ -109,86 +116,84 @@ EOF
   echo
 
   # 
-# USB-drive detection & selection
-# 
-if [[ -z "$USB_BACKUP_LABEL" ]]; then
-  echo "USB BACKUP DRIVE"
-  echo "────────────────────────────────────────────────────────"
-  echo
-  while :; do
-    # Use lsblk with pairs output for easier parsing
-    mapfile -t devices < <(
-      lsblk -ln -o NAME,LABEL -P \
-        | grep 'NAME="sd[a-z][0-9]\+"' \
-        | grep -v 'LABEL=""' \
-        | while IFS= read -r line; do
-            eval "$line"
-            echo "/dev/$NAME:$LABEL"
-          done
-    )
+  # USB-drive detection & selection
+  # 
+  if [[ -z "$USB_BACKUP_LABEL" ]]; then
+    echo "USB BACKUP DRIVE"
+    echo "────────────────────────────────────────────────────────"
+    echo
+    while :; do
+      # Use lsblk with pairs output for easier parsing
+      mapfile -t devices < <(
+        lsblk -ln -o NAME,LABEL -P \
+          | grep 'NAME="sd[a-z][0-9]\+"' \
+          | grep -v 'LABEL=""' \
+          | while IFS= read -r line; do
+              eval "$line"
+              echo "/dev/$NAME:$LABEL"
+            done
+      )
 
-    if (( ${#devices[@]} > 0 )); then
-      echo "Detected USB drives:"
-      for i in "${!devices[@]}"; do
-        dev="${devices[i]%%:*}"
-        lbl="${devices[i]#*:}"
-        printf "  %2d) %-12s (label=\"%s\")\n" $((i+1)) "$dev" "$lbl"
-      done
-      echo
+      if (( ${#devices[@]} > 0 )); then
+        echo "Detected USB drives:"
+        for i in "${!devices[@]}"; do
+          dev="${devices[i]%%:*}"
+          lbl="${devices[i]#*:}"
+          printf "  %2d) %-12s (label=\"%s\")\n" $((i+1)) "$dev" "$lbl"
+        done
+        echo
 
-      read -rp "Select a drive [1-${#devices[@]}] or S to skip: " choice
-      
-      # Check if user wants to skip
-      if [[ "${choice^^}" == "S" ]]; then
-        echo "Skipping USB setup."
-        USB_BACKUP_LABEL=""
-        break
-      fi
-      
-      if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && (( choice <= ${#devices[@]} )); then
-        USB_BACKUP_LABEL="${devices[choice-1]#*:}"
-        echo "Using label: $USB_BACKUP_LABEL"
-        break
-      else
-        echo "Invalid choice." >&2
-      fi
-
-    else
-      echo "No labeled USB drives found."
-      read -rp "[R]etry, [M]anual entry, or [S]kip USB setup? " ans
-      case "${ans^^}" in
-        R)  continue ;;
-        M)  
-          read -rp "Enter USB label manually: " USB_BACKUP_LABEL
-          if [[ -n "$USB_BACKUP_LABEL" ]]; then
-            break
-          else
-            echo "Label cannot be empty. Please try again."
-          fi
-          ;;
-        S)  
+        read -rp "Select a drive [1-${#devices[@]}] or S to skip: " choice
+        
+        # Check if user wants to skip
+        if [[ "${choice^^}" == "S" ]]; then
           echo "Skipping USB setup."
           USB_BACKUP_LABEL=""
           break
-          ;;
-        *)  echo "Please choose R, M, or S." ;;
-      esac
-    fi
-  done
+        fi
+        
+        if [[ "$choice" =~ ^[1-9][0-9]*$ ]] && (( choice <= ${#devices[@]} )); then
+          USB_BACKUP_LABEL="${devices[choice-1]#*:}"
+          echo "Using label: $USB_BACKUP_LABEL"
+          break
+        else
+          echo "Invalid choice." >&2
+        fi
+
+      else
+        echo "No labeled USB drives found."
+        read -rp "[R]etry, [M]anual entry, or [S]kip USB setup? " ans
+        case "${ans^^}" in
+          R)  continue ;;
+          M)  
+            read -rp "Enter USB label manually: " USB_BACKUP_LABEL
+            if [[ -n "$USB_BACKUP_LABEL" ]]; then
+              break
+            else
+              echo "Label cannot be empty. Please try again."
+            fi
+            ;;
+          S)  
+            echo "Skipping USB setup."
+            USB_BACKUP_LABEL=""
+            break
+            ;;
+          *)  echo "Please choose R, M, or S." ;;
+        esac
+      fi
+    done
+    echo
+  fi
+
+  # interactive for anything missing
+  echo "PROJECT DETAILS"
+  echo "────────────────────────────────────────────────────────"
   echo
-fi
-
-# interactive for anything missing - SKIP USB_BACKUP_LABEL prompt
-echo "PROJECT DETAILS"
-echo "────────────────────────────────────────────────────────"
-echo
-[[ -z "$PROJECT_NAME" ]] && read -rp "Project name: " PROJECT_NAME
-# Removed: [[ -z "$USB_BACKUP_LABEL" ]] && read -rp "USB backup label: " USB_BACKUP_LABEL
-if [[ -z "$INTERVAL_MINS" ]]; then
-  read -rp "Capture interval in minutes (e.g. 5): " INTERVAL_MINS
-fi
-echo
-
+  [[ -z "$PROJECT_NAME" ]] && read -rp "Project name: " PROJECT_NAME
+  if [[ -z "$INTERVAL_MINS" ]]; then
+    read -rp "Capture interval in minutes (e.g. 5): " INTERVAL_MINS
+  fi
+  echo
 
   # Configure capture time window
   echo "CAPTURE TIME WINDOW"
@@ -254,6 +259,63 @@ echo
   CLEANUP_HOUR=$(echo "$CLEANUP_TIME" | cut -d: -f1)
   CLEANUP_MIN=$(echo "$CLEANUP_TIME" | cut -d: -f2)
 
+  # Configure notifications
+  echo
+  echo "NOTIFICATION SETTINGS"
+  echo "────────────────────────────────────────────────────────"
+  echo
+  
+  # Email configuration
+  if [[ -z "$EMAIL_RECIPIENTS" ]]; then
+    echo "Email Notifications:"
+    echo "  Enter email addresses for daily reports (space-separated)"
+    echo "  Example: user1@example.com user2@example.com"
+    echo "  Press Enter to skip email notifications"
+    echo
+    read -rp "Email recipients: " EMAIL_RECIPIENTS
+    echo
+  fi
+  
+  # Slack configuration
+  if [[ -z "$SLACK_WEBHOOK" ]]; then
+    echo "Slack Notifications:"
+    echo "────────────────────────────────────────────────────────"
+    echo
+    echo "To get your Slack Webhook URL:"
+    echo "  1. Go to: https://api.slack.com/apps"
+    echo "  2. Click 'Create New App' → 'From scratch' OR click on the app you have already created and skip to step 7"  
+    echo "  3. Name your app (e.g., 'Timelapse Bot') and select your workspace"
+    echo "  4. Click 'Incoming Webhooks' → Toggle 'Activate Incoming Webhooks' ON"
+    echo "  5. Click 'Add New Webhook to Workspace'"
+    echo "  6. If the webhook already exits, copy it."
+    echo "  6. Select the channel for notifications"
+    echo "  7. Copy the Webhook URL (starts with https://hooks.slack.com/...)"
+    echo
+    echo "Press Enter to skip Slack notifications"
+    echo
+    read -rp "Slack Webhook URL: " SLACK_WEBHOOK
+    echo
+    
+    if [[ -n "$SLACK_WEBHOOK" ]]; then
+      echo "Slack User ID (for mentions):"
+      echo "────────────────────────────────────────────────────────"
+      echo
+      echo "To get your Slack User ID:"
+      echo "  1. In Slack, click on your profile picture"
+      echo "  2. Click 'Profile'"
+      echo "  3. Click the three dots (···) → 'Copy member ID'"
+      echo "  OR"
+      echo "  1. Right-click on your name in any channel"
+      echo "  2. Select 'Copy member ID'"
+      echo
+      echo "The ID looks like: U0RSCG38X"
+      echo "Press Enter to skip user mentions (notifications will still be sent)"
+      echo
+      read -rp "Slack User ID: " SLACK_USER_ID
+      echo
+    fi
+  fi
+
   # persist config
   sudo bash -c "cat > '$CONFIG_FILE' <<EOF
 PROJECT_NAME=\"${PROJECT_NAME}\"
@@ -264,6 +326,9 @@ STOP_HOUR=\"${STOP_HOUR}\"
 SYNC_TIME=\"${SYNC_TIME}\"
 MONTAGE_TIME=\"${MONTAGE_TIME}\"
 CLEANUP_TIME=\"${CLEANUP_TIME}\"
+EMAIL_RECIPIENTS=\"${EMAIL_RECIPIENTS}\"
+SLACK_WEBHOOK=\"${SLACK_WEBHOOK}\"
+SLACK_USER_ID=\"${SLACK_USER_ID}\"
 EOF"
   sudo chmod 600 "$CONFIG_FILE"
   echo
@@ -292,7 +357,7 @@ EOF"
   echo
   echo "Configuration:"
   echo "  Project: $PROJECT_NAME"
-  echo "  USB Label: $USB_BACKUP_LABEL"
+  echo "  USB Label: ${USB_BACKUP_LABEL:-Not configured}"
   echo "  Capture Interval: Every $INTERVAL_MINS minutes"
   echo "  Capture Hours: ${START_HOUR}:00 to ${STOP_HOUR}:00"
   echo
@@ -300,6 +365,13 @@ EOF"
   echo "  Photo Sync:      $SYNC_TIME"
   echo "  Daily Montage:   $MONTAGE_TIME"
   echo "  Cleanup:         $CLEANUP_TIME"
+  echo
+  echo "Notifications:"
+  echo "  Email: ${EMAIL_RECIPIENTS:-Not configured}"
+  echo "  Slack: ${SLACK_WEBHOOK:+Configured}${SLACK_WEBHOOK:-Not configured}"
+  if [[ -n "$SLACK_USER_ID" ]]; then
+    echo "  Slack Mentions: Enabled (User ID: $SLACK_USER_ID)"
+  fi
   echo
   echo "All cron jobs are in: /etc/cron.d/timelapse"
   echo
@@ -328,12 +400,13 @@ ARCHIVE_DIR="/home/admin/archive"               # Folder for archived backups (o
 DAILY_MONTAGE="/home/admin/daily_report_$DATE.jpg"   # Path for the daily thumbnail table
 LOG_FILE="/var/log/timelapse.log"       # Log file
 VERBOSE=true                                    # Toggle verbose output
-SLACK_WEBHOOK="https://hooks.slack.com/services/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"
-SLACK_USER_ID="U0RSCG38X"
+# These will be loaded from config file or set during setup
+EMAIL_RECIPIENTS="${EMAIL_RECIPIENTS:-}"
+SLACK_WEBHOOK="${SLACK_WEBHOOK:-}"
+SLACK_USER_ID="${SLACK_USER_ID:-}"
 # Rate limiting for Slack mentions
 MENTION_COOLDOWN_FILE="/tmp/timelapse_mention_cooldown_${PROJECT_NAME// /_}"
 MENTION_COOLDOWN_SECONDS=3600  # 1 hour
-EMAIL_RECIPIENTS="daniel@aperturemedia.ie, sean@seankennedy.info"         # Recipient for daily montage email
 EMAIL_SUBJECT="Daily Report - $DATE"            # Subject for the email
 GDRIVE_REMOTE="aperturetimelapsedrive"          # Google Drive remote name
 MOUNT_POINT="/mnt/BackupArchive"
