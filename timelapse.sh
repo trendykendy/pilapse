@@ -324,35 +324,24 @@ EOF
   echo "  - Pings every 15 minutes"
   echo "  - Alerts if no ping received within 20 minutes"
   echo
-  echo "To get your API key:"
+  echo "To get the API key:"
+  echo "  - Check the 'Install Info' document on Google Drive"
+  echo
+  echo "Or to use your own healthchecks.io account:"
   echo "  1. Go to: https://healthchecks.io"
   echo "  2. Go to Settings → API Access"
   echo "  3. Copy your API key"
   echo
-  echo "Press Enter to use default API key, or enter your own"
-  echo "Enter 'skip' to disable healthchecks monitoring"
+  echo "Press Enter to skip healthchecks monitoring"
   echo
-  read -rp "Healthchecks API key [default]: " HEALTHCHECKS_API_KEY_INPUT
+  read -rp "Healthchecks API key: " HEALTHCHECKS_API_KEY
   echo
-  
-  # Default API key (pulled from GitHub or hardcoded)
-  DEFAULT_HEALTHCHECKS_API_KEY=${{ secrets.HEALTHCHECK_API_KEY }}
   
   HEALTHCHECKS_PING_URL=""
   
-  # Handle input
-  if [[ "${HEALTHCHECKS_API_KEY_INPUT,,}" == "skip" ]]; then
+  if [[ -z "$HEALTHCHECKS_API_KEY" ]]; then
     echo "Skipping healthchecks monitoring"
-    HEALTHCHECKS_API_KEY=""
-  elif [[ -z "$HEALTHCHECKS_API_KEY_INPUT" ]]; then
-    echo "Using default API key"
-    HEALTHCHECKS_API_KEY="$DEFAULT_HEALTHCHECKS_API_KEY"
   else
-    echo "Using provided API key"
-    HEALTHCHECKS_API_KEY="$HEALTHCHECKS_API_KEY_INPUT"
-  fi
-  
-  if [[ -n "$HEALTHCHECKS_API_KEY" ]]; then
     echo -n "Creating healthcheck for project: $PROJECT_NAME... "
     
     # Create the check via API with timeout
@@ -432,8 +421,6 @@ EOF
       fi
     fi
   fi
-
-
 
   # persist config
   sudo bash -c "cat > '$CONFIG_FILE' <<EOF
