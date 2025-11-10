@@ -19,9 +19,6 @@ else
   SYNC_TIME="22:00"
   MONTAGE_TIME="23:00"
   CLEANUP_TIME="00:00"
-  EMAIL_RECIPIENTS=""
-  SLACK_WEBHOOK=""
-  SLACK_USER_ID=""
 fi
 
 # 
@@ -54,9 +51,6 @@ STOP_HOUR=\"${STOP_HOUR:-19}\"
 SYNC_TIME=\"${SYNC_TIME:-22:00}\"
 MONTAGE_TIME=\"${MONTAGE_TIME:-23:00}\"
 CLEANUP_TIME=\"${CLEANUP_TIME:-00:00}\"
-EMAIL_RECIPIENTS=\"${EMAIL_RECIPIENTS:-}\"
-SLACK_WEBHOOK=\"${SLACK_WEBHOOK:-}\"
-SLACK_USER_ID=\"${SLACK_USER_ID:-}\"
 EOF"
   sudo chmod 644 "$CONFIG_FILE"
   echo "Updated /etc/timelapse.conf with INTERVAL_MINS=$NEW_INTERVAL"
@@ -131,7 +125,7 @@ EOF
     while :; do
       # Use lsblk with pairs output for easier parsing
       mapfile -t devices < <(
-        lsblk -ln -o NAME,LABEL -P \
+        lsblk -n -o NAME,LABEL -P \
           | grep 'NAME="sd[a-z][0-9]\+"' \
           | grep -v 'LABEL=""' \
           | while IFS= read -r line; do
@@ -293,9 +287,9 @@ EOF
     echo "  3. Name your app (e.g., 'Timelapse Bot') and select your workspace"
     echo "  4. Click 'Incoming Webhooks' → Toggle 'Activate Incoming Webhooks' ON"
     echo "  5. Click 'Add New Webhook to Workspace'"
-    echo "  6. If the webhook already exists, copy it."
-    echo "  7. Select the channel for notifications"
-    echo "  8. Copy the Webhook URL (starts with https://hooks.slack.com/...)"
+    echo "  6. If the webhook already exits, copy it."
+    echo "  6. Select the channel for notifications"
+    echo "  7. Copy the Webhook URL (starts with https://hooks.slack.com/...)"
     echo
     echo "Press Enter to skip Slack notifications"
     echo
@@ -355,23 +349,6 @@ $CLEANUP_MIN $CLEANUP_HOUR * * * root /usr/local/bin/timelapse cleanup_directori
 EOF"
   sudo chmod 644 "$CRON_FILE"
   echo "✓ Cron jobs installed in $CRON_FILE"
-
-  # Initialize Google Drive counter
-  echo
-  echo "INITIALIZING COUNTER SYSTEM"
-  echo "────────────────────────────────────────────────────────"
-  echo
-  verbose_log "Initializing counter system..."
-  
-  # Make sure counter directory exists
-  sudo mkdir -p /var/lib/timelapse
-  sudo chmod 755 /var/lib/timelapse
-  
-  # Initialize the counter
-  init_gdrive_counter
-  
-  echo "✓ Counter system initialized"
-  echo
 
   echo
   echo "═══════════════════════════════════════════════════════"
@@ -491,265 +468,18 @@ log() {
     }
 }
 
-# Helper function for verbose output
-verbose_log() {
-    if [ "$VERBOSE" = true ]; then
-        echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
-    fi
-}
 
 # Initialize the counter file if it doesn't exist
 COUNTER_FILE="/var/lib/timelapse/counter.txt"
-COUNTER_BACKUP_FILE="/mnt/BackupArchive/timelapse_counter_backup.txt"
-GDRIVE_COUNTER_FILE="$GDRIVE_REMOTE:$PROJECT_NAME/.timelapse_counter.txt"
-
-# Function to initialize counter directory
-init_counter() {
-    if [ ! -d "/var/lib/timelapse" ]; then
-        sudo mkdir -p "/var/lib/timelapse"
-        sudo chmod 755 "/var/lib/timelapse"
-    fi
-    
-    if [ ! -f "$COUNTER_FILE" ]; then
-        echo "00001" > "$COUNTER_FILE"
-    fi
-}
-
-# Function to extract counter from filename
-extract_counter_from_filename() {
-    local filename="$1"
-    # Extract the counter part (before first underscore)
-    echo "$filename" | grep -oE '^[0-9]{5}' || echo "0"
-}
-
-# Function to update Google Drive counter
-update_gdrive_counter() {
-    local counter_value="$1"
-    local temp_file=$(mktemp)
-    
-    printf "%05d" "$counter_value" > "$temp_file"
-    
-    if rclone copyto "$temp_file" "$GDRIVE_COUNTER_FILE" 2>/dev/null; then
-        verbose_log "Updated Google Drive counter to: $counter_value"
-        log "Google Drive counter updated: $counter_value"
-    else
-        verbose_log "Failed to update Google Drive counter"
-        log "Warning: Failed to update Google Drive counter"
-    fi
-    
-    rm -f "$temp_file"
-}
-
-# Function to read Google Drive counter
-read_gdrive_counter() {
-    local temp_file=$(mktemp)
-    
-    if rclone copyto "$GDRIVE_COUNTER_FILE" "$temp_file" 2>/dev/null; then
-        local counter=$(cat "$temp_file" | tr -d '\n')
-        rm -f "$temp_file"
-        echo "$((10#$counter))"
-    else
-        rm -f "$temp_file"
-        echo "0"
-    fi
-}
-
-# Function to initialize Google Drive counter
-init_gdrive_counter() {
-    verbose_log "Checking if Google Drive counter exists..."
-    
-    # Try to read the counter
-    local gdrive_counter=$(read_gdrive_counter)
-    
-    if [ "$gdrive_counter" -eq 0 ]; then
-        # Counter doesn't exist on Google Drive, initialize it
-        verbose_log "Google Drive counter not found, initializing..."
-        
-        # Find the highest counter from all sources
-        local highest=$(find_highest_counter)
-        
-        if [ "$highest" -eq 0 ]; then
-            # No photos exist anywhere, start at 1
-            highest=1
-            verbose_log "No existing photos found, initializing counter to 00001"
-        else
-            verbose_log "Found existing photos, initializing counter to: $(printf "%05d" $highest)"
-        fi
-        
-        # Create the counter file on Google Drive
-        update_gdrive_counter "$highest"
-        
-        # Also initialize local counter if needed
-        if [ ! -f "$COUNTER_FILE" ]; then
-            printf "%05d" "$highest" > "$COUNTER_FILE"
-        fi
-    else
-        verbose_log "Google Drive counter already exists: $(printf "%05d" $gdrive_counter)"
-    fi
-}
-
-# Function to find highest counter from multiple sources
-find_highest_counter() {
-    local max_counter=0
-    local source="default"
-    
-    verbose_log "Searching for highest counter across all sources..."
-    
-    # 1. Check local counter file
-    if [ -f "$COUNTER_FILE" ]; then
-        local local_counter=$(cat "$COUNTER_FILE" | tr -d '\n')
-        local_counter=$((10#$local_counter))  # Convert to decimal, removing leading zeros
-        if [ "$local_counter" -gt "$max_counter" ]; then
-            max_counter=$local_counter
-            source="local_file"
-        fi
-        verbose_log "Local counter file: $local_counter"
-    fi
-    
-    # 2. Check USB backup counter file
-    if [[ -n "$DEVICE" ]] && [[ -b "$DEVICE" ]]; then
-        local usb_mounted=false
-        if ! mountpoint -q "$MOUNT_POINT"; then
-            mkdir -p "$MOUNT_POINT"
-            if mount "$DEVICE" "$MOUNT_POINT" 2>/dev/null; then
-                verbose_log "USB mounted for counter check"
-                usb_mounted=true
-            fi
-        fi
-        
-        if mountpoint -q "$MOUNT_POINT" && [ -f "$COUNTER_BACKUP_FILE" ]; then
-            local usb_counter=$(cat "$COUNTER_BACKUP_FILE" | tr -d '\n')
-            usb_counter=$((10#$usb_counter))
-            if [ "$usb_counter" -gt "$max_counter" ]; then
-                max_counter=$usb_counter
-                source="usb_backup"
-            fi
-            verbose_log "USB backup counter: $usb_counter"
-        fi
-        
-        # Unmount if we mounted it
-        if [ "$usb_mounted" = true ]; then
-            umount "$MOUNT_POINT" 2>/dev/null
-            verbose_log "USB unmounted after counter check"
-        fi
-    fi
-    
-    # 3. Check Google Drive counter file (fast!)
-    verbose_log "Checking Google Drive counter file..."
-    local gdrive_counter=$(read_gdrive_counter)
-    if [ "$gdrive_counter" -gt 0 ]; then
-        if [ "$gdrive_counter" -gt "$max_counter" ]; then
-            max_counter=$gdrive_counter
-            source="google_drive"
-        fi
-        verbose_log "Google Drive counter: $gdrive_counter"
-    else
-        verbose_log "No Google Drive counter found or connection failed"
-    fi
-    
-    # 4. Fallback: Check local backup folder for actual files (slower)
-    if [ "$max_counter" -eq 0 ]; then
-        verbose_log "No counters found, scanning local backup files as fallback..."
-        local backup_highest=$(find "$BACKUP_DIR" -type f -name "[0-9][0-9][0-9][0-9][0-9]_*.jpg" 2>/dev/null | \
-            while read -r file; do
-                extract_counter_from_filename "$(basename "$file")"
-            done | sort -rn | head -1)
-        
-        if [ -n "$backup_highest" ]; then
-            local backup_counter=$((10#$backup_highest))
-            if [ "$backup_counter" -gt "$max_counter" ]; then
-                max_counter=$backup_counter
-                source="local_backup_files"
-            fi
-            verbose_log "Highest local backup counter: $backup_counter"
-        fi
-    fi
-    
-    # 5. Fallback: Check local photos folder (slower)
-    if [ "$max_counter" -eq 0 ]; then
-        verbose_log "No counters found, scanning local photo files as fallback..."
-        local photo_highest=$(find "$PHOTO_DIR" -type f -name "[0-9][0-9][0-9][0-9][0-9]_*.jpg" 2>/dev/null | \
-            while read -r file; do
-                extract_counter_from_filename "$(basename "$file")"
-            done | sort -rn | head -1)
-        
-        if [ -n "$photo_highest" ]; then
-            local photo_counter=$((10#$photo_highest))
-            if [ "$photo_counter" -gt "$max_counter" ]; then
-                max_counter=$photo_counter
-                source="local_photo_files"
-            fi
-            verbose_log "Highest local photo counter: $photo_counter"
-        fi
-    fi
-    
-    verbose_log "Highest counter found: $max_counter (source: $source)"
-    log "Counter recovered from $source: $max_counter"
-    
-    # If we found a counter from files but not from counter files, initialize the counter files
-    if [ "$max_counter" -gt 0 ] && [ "$source" != "local_file" ] && [ "$source" != "usb_backup" ] && [ "$source" != "google_drive" ]; then
-        verbose_log "Initializing counter files with recovered value: $max_counter"
-        printf "%05d" "$max_counter" > "$COUNTER_FILE"
-        update_gdrive_counter "$max_counter"
-    fi
-    
-    echo "$max_counter"
-}
+if [ ! -f "$COUNTER_FILE" ]; then
+    echo "00001" > "$COUNTER_FILE"
+fi
 
 # Function to get and increment the counter
 get_next_counter() {
-    # Initialize if needed
-    init_counter
-    
-    # Ensure Google Drive counter exists (only checks once, fast if already exists)
-    local gdrive_counter=$(read_gdrive_counter)
-    if [ "$gdrive_counter" -eq 0 ]; then
-        verbose_log "Google Drive counter not initialized, initializing now..."
-        init_gdrive_counter
-    fi
-    
-    # Find the highest counter from all sources
-    local highest=$(find_highest_counter)
-    
-    # Get current counter from file
-    local current=$(cat "$COUNTER_FILE" | tr -d '\n')
-    current=$((10#$current))
-    
-    # Use whichever is higher
-    if [ "$highest" -gt "$current" ]; then
-        verbose_log "Counter mismatch detected. Local: $current, Highest found: $highest. Using highest."
-        log "Counter recovered: was $current, now using $highest"
-        current=$highest
-    fi
-    
-    # Increment for next photo
-    local next=$((current + 1))
-    
-    # Save the incremented counter locally
-    printf "%05d" "$next" > "$COUNTER_FILE"
-    
-    # Backup to USB if available
-    if [[ -n "$DEVICE" ]] && [[ -b "$DEVICE" ]]; then
-        local usb_mounted=false
-        if ! mountpoint -q "$MOUNT_POINT"; then
-            mkdir -p "$MOUNT_POINT"
-            if mount "$DEVICE" "$MOUNT_POINT" 2>/dev/null; then
-                usb_mounted=true
-            fi
-        fi
-        
-        if mountpoint -q "$MOUNT_POINT"; then
-            printf "%05d" "$next" > "$COUNTER_BACKUP_FILE" 2>/dev/null
-            verbose_log "Counter backed up to USB"
-        fi
-        
-        if [ "$usb_mounted" = true ]; then
-            umount "$MOUNT_POINT" 2>/dev/null
-        fi
-    fi
-    
-    # Return current counter (before increment)
-    printf "%05d" "$current"
+    COUNTER=$(cat "$COUNTER_FILE")
+    printf "%05d" "$COUNTER" # Format as a 5-digit number
+    echo $((COUNTER + 1)) > "$COUNTER_FILE"
 }
 
 generate_filename() {
@@ -757,6 +487,13 @@ generate_filename() {
     TIMESTAMP=$(date +"%Y%m%d_%H%M") # Format timestamp as YYYYMMDD_HHMM
     FILENAME="${COUNTER}_${TIMESTAMP}.jpg" # Combine counter and timestamp
     echo "$FILENAME"
+}
+
+# Helper function for verbose output
+verbose_log() {
+    if [ "$VERBOSE" = true ]; then
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+    fi
 }
 
 # Helper function to send Slack notification
@@ -829,6 +566,8 @@ notify_slack() {
     fi
 }
 
+
+
 # Helper function to send email with attachment using msmtp
 send_email() {
     local attachment="$1"
@@ -863,9 +602,10 @@ send_email() {
     else
         verbose_log "Failed to send email with attachment to $EMAIL_RECIPIENTS."
         log "Failed to send email with attachment to $EMAIL_RECIPIENTS."
-        notify_slack "Failed to send email with attachment for daily montage."
+        notify_slack "<@U0RSCG38X> Failed to send email with attachment for daily montage."
     fi
 }
+
 
 # Capture photo
 take_photo() {
@@ -929,6 +669,7 @@ take_photo() {
     return 1
 }
 
+
 # Process photo: upload and backup
 process_photo() {
     local photo_path="$1"
@@ -946,7 +687,9 @@ process_photo() {
     
     # Move the photo to the backup folder
     backup_photo "$photo_path"
+    
 }
+
 
 # Upload photo to Google Drive
 upload_photo() {
@@ -972,7 +715,7 @@ upload_photo() {
         if [[ $? -ne 0 ]]; then
             verbose_log "Remote file not found: $remote_file_path"
             log "Error: Remote file not found for checksum verification: $photo_path"
-            notify_slack "Upload verification failed: Remote file not found\nFile: $photo_filename"
+            notify_slack "<@U0RSCG38X> Upload verification failed: Remote file not found\nFile: $photo_filename"
             return 1
         fi
 
@@ -985,17 +728,11 @@ upload_photo() {
         if [[ "$local_checksum" = "$remote_checksum" ]]; then
             verbose_log "Checksum match: File integrity verified for $photo_filename"
             log "Upload successful and verified: $photo_path"
-            
-            # Extract counter from filename and update Google Drive counter
-            local counter=$(extract_counter_from_filename "$photo_filename")
-            counter=$((10#$counter))
-            update_gdrive_counter "$counter"
-            
             return 0
         else
             verbose_log "Checksum mismatch: File may be corrupted. Local: $local_checksum, Remote: $remote_checksum"
             log "Error: Checksum mismatch for $photo_filename"
-            notify_slack "Checksum mismatch for photo: $photo_filename\nLocal: $local_checksum\nRemote: $remote_checksum"
+            notify_slack "<@U0RSCG38X> Checksum mismatch for photo: $photo_filename\nLocal: $local_checksum\nRemote: $remote_checksum"
             return 1
         fi
     else
@@ -1008,10 +745,12 @@ upload_photo() {
             error_summary="Upload failed (exit code: $upload_result)"
         fi
         
-        notify_slack "Upload failed for photo: $photo_filename\nError: $error_summary"
+        notify_slack "<@U0RSCG38X> Upload failed for photo: $photo_filename\nError: $error_summary"
         return 1
     fi
 }
+
+
 
 # Backup photo locally with checksum verification
 backup_photo() {
@@ -1027,7 +766,7 @@ backup_photo() {
         local error_msg="Failed to create backup directory: $backup_path"
         verbose_log "$error_msg"
         log "Error: $error_msg"
-        notify_slack "Backup directory creation failed\nPath: $backup_path\nPossible USB drive failure"
+        notify_slack "<@U0RSCG38X> Backup directory creation failed\nPath: $backup_path\nPossible USB drive failure"
         return 1
     fi
 
@@ -1037,7 +776,7 @@ backup_photo() {
     if [[ -z "$original_checksum" ]]; then
         verbose_log "Failed to calculate checksum for original file: $photo_path"
         log "Error: Failed to calculate checksum for original file: $photo_path"
-        notify_slack "Checksum calculation failed\nFile: $photo_name"
+        notify_slack "<@U0RSCG38X> Checksum calculation failed\nFile: $photo_name"
         return 1
     fi
 
@@ -1046,7 +785,7 @@ backup_photo() {
     if [[ $? -ne 0 ]]; then
         verbose_log "Failed to move photo to backup directory: $backup_path"
         log "Error: Failed to back up photo: $photo_path"
-        notify_slack "Failed to backup photo\nFile: $photo_name\nError: $mv_error\nPossible USB drive failure"
+        notify_slack "<@U0RSCG38X> Failed to backup photo\nFile: $photo_name\nError: $mv_error\nPossible USB drive failure"
         return 1
     fi
 
@@ -1056,14 +795,14 @@ backup_photo() {
     if [[ -z "$backup_checksum" ]]; then
         verbose_log "Failed to calculate checksum for backup file: $backup_path/$photo_name"
         log "Error: Failed to calculate checksum for backup file: $backup_path/$photo_name"
-        notify_slack "Backup checksum verification failed\nFile: $photo_name\nPossible USB drive failure"
+        notify_slack "<@U0RSCG38X> Backup checksum verification failed\nFile: $photo_name\nPossible USB drive failure"
         return 1
     fi
 
     if [[ "$original_checksum" != "$backup_checksum" ]]; then
         verbose_log "Checksum mismatch: Backup may be corrupted. Original: $original_checksum, Backup: $backup_checksum"
         log "Error: Backup verification failed for photo: $photo_path"
-        notify_slack "Backup verification failed\nFile: $photo_name\nOriginal checksum: $original_checksum\nBackup checksum: $backup_checksum\nPossible USB drive failure"
+        notify_slack "<@U0RSCG38X> Backup verification failed\nFile: $photo_name\nOriginal checksum: $original_checksum\nBackup checksum: $backup_checksum\nPossible USB drive failure"
         return 1
     fi
 
@@ -1071,6 +810,7 @@ backup_photo() {
     log "Photo backed up and verified locally: $backup_path$photo_name"
     return 0
 }
+
 
 # Generate thumbnail for a photo with time label
 generate_thumbnail() {
@@ -1129,7 +869,6 @@ end_of_day_sync() {
     remote_files_present=0
     successful_uploads=0
     failed_uploads=0
-    local highest_uploaded_counter=0
 
     # Ensure the failed uploads folder exists
     mkdir -p "$failed_uploads_folder"
@@ -1163,13 +902,6 @@ end_of_day_sync() {
                 file_name=$(basename "$file")
                 if echo "$remote_files_list" | grep -q "^$file_name$"; then
                     remote_files_present=$((remote_files_present + 1))
-                    
-                    # Track highest counter from already-uploaded files
-                    local counter=$(extract_counter_from_filename "$file_name")
-                    counter=$((10#$counter))
-                    if [ "$counter" -gt "$highest_uploaded_counter" ]; then
-                        highest_uploaded_counter=$counter
-                    fi
                 fi
             fi
         done
@@ -1197,13 +929,6 @@ end_of_day_sync() {
                 successful_uploads=$((successful_uploads + 1))
                 verbose_log "Successfully uploaded: $file"
                 log "Successfully uploaded: $file"
-                
-                # Track the highest counter from uploaded files
-                local counter=$(extract_counter_from_filename "$file_name")
-                counter=$((10#$counter))
-                if [ "$counter" -gt "$highest_uploaded_counter" ]; then
-                    highest_uploaded_counter=$counter
-                fi
             else
                 failed_uploads=$((failed_uploads + 1))
                 verbose_log "Failed to upload: $file"
@@ -1216,12 +941,6 @@ end_of_day_sync() {
             fi
         fi
     done
-
-    # Update Google Drive counter with the highest counter we've seen
-    if [ "$highest_uploaded_counter" -gt 0 ]; then
-        verbose_log "Updating Google Drive counter to highest uploaded: $highest_uploaded_counter"
-        update_gdrive_counter "$highest_uploaded_counter"
-    fi
 
     # Copy the logs to Google Drive
     verbose_log "Copying logs to remote Google Drive folder: $logs_remote_folder"
@@ -1258,6 +977,8 @@ end_of_day_sync() {
     
     if [ "$successful_uploads" -gt 0 ]; then
         verbose_log "Verifying uploaded files exist on remote..."
+        # We need to track which files we uploaded - let's check the log
+        # For now, we'll trust the upload count if final remote count increased appropriately
         local expected_remote_total=$((total_remote_files + successful_uploads))
         if [ "$final_remote_total" -eq "$expected_remote_total" ]; then
             verified_uploads=$successful_uploads
@@ -1274,7 +995,6 @@ end_of_day_sync() {
     verbose_log "Files already synced: $remote_files_present"
     verbose_log "Files successfully uploaded: $successful_uploads"
     verbose_log "Files failed to upload: $failed_uploads"
-    verbose_log "Highest uploaded counter: $highest_uploaded_counter"
     verbose_log "Final state (verified) - Local: $final_local_total, Remote: $final_remote_total"
 
     log "End-of-Day Sync Summary:"
@@ -1282,7 +1002,6 @@ end_of_day_sync() {
     log "Files already synced: $remote_files_present"
     log "Files successfully uploaded: $successful_uploads"
     log "Files failed to upload: $failed_uploads"
-    log "Highest uploaded counter: $highest_uploaded_counter"
     log "Final state (verified) - Local: $final_local_total, Remote: $final_remote_total"
 
     # Build Slack message with verified data
@@ -1310,10 +1029,6 @@ end_of_day_sync() {
     slack_message+="\n*Final Status (Verified):*\n"
     slack_message+="💾 Local backup: $final_local_total images\n"
     slack_message+="☁️ Google Drive: $final_remote_total images"
-    
-    if [ "$highest_uploaded_counter" -gt 0 ]; then
-        slack_message+="\n📊 Counter updated to: $(printf "%05d" $highest_uploaded_counter)"
-    fi
     
     if [ "$failed_uploads" -gt 0 ]; then
         slack_message+="\n\n⚠️ $failed_uploads files moved to USB backup folder"
@@ -1397,7 +1112,7 @@ create_daily_montage() {
     montage "${today_thumbnails[@]}" -tile 6x -geometry +2+2 "$temp_montage" || {
         verbose_log "montage command failed."
         log "montage command failed."
-        notify_slack "montage command failed."
+        notify_slack "<@U0RSCG38X> montage command failed."
         return
     }
 
@@ -1498,6 +1213,7 @@ create_daily_montage() {
     log "Thumbnails for the day cleared."
 }
 
+
 # Send daily report via Slack
 send_daily_report() {
     local montage_path="$1"
@@ -1570,6 +1286,7 @@ count_images_for_report() {
     # Format the result as a string to pass to the send email or report functions
     echo "Images for today on Google Drive: $google_drive_count, Images for today on USB Backup: $usb_backup_count"
 }
+
 
 cleanup_directories() {
     # Define the directories to clean up
@@ -2037,30 +1754,6 @@ case "${1:-}" in
     count_images_for_report
     verbose_log "Done."
     ;;
-  init-counter)
-    echo "Initializing counter system..."
-    init_counter
-    init_gdrive_counter
-    echo "Counter system initialized."
-    
-    local local_counter=$(cat "$COUNTER_FILE" 2>/dev/null || echo "00001")
-    local gdrive_counter=$(read_gdrive_counter)
-    
-    echo
-    echo "Current counter values:"
-    echo "  Local:        $local_counter"
-    echo "  Google Drive: $(printf "%05d" $gdrive_counter)"
-    
-    if [[ -n "$DEVICE" ]] && [[ -b "$DEVICE" ]]; then
-        if mountpoint -q "$MOUNT_POINT" || mount "$DEVICE" "$MOUNT_POINT" 2>/dev/null; then
-            if [ -f "$COUNTER_BACKUP_FILE" ]; then
-                local usb_counter=$(cat "$COUNTER_BACKUP_FILE")
-                echo "  USB Backup:   $usb_counter"
-            fi
-            umount "$MOUNT_POINT" 2>/dev/null
-        fi
-    fi
-    ;;
   status)
     echo "Timelapse System Status"
     echo "======================="
@@ -2122,9 +1815,9 @@ case "${1:-}" in
         sudo cp /tmp/timelapse-new /usr/local/bin/timelapse
         sudo chmod +x /usr/local/bin/timelapse
         rm /tmp/timelapse-new
-        verbose_log "Updated to latest version"
+        log_success "Updated to latest version"
     else
-        verbose_log "Update failed"
+        log_error "Update failed"
     fi
     ;;
 
@@ -2136,7 +1829,6 @@ Setup Commands:
   setup                    - Configure project and schedule
   add-wifi                 - Add WiFi network
   change-interval [MINS]   - Change capture interval
-  init-counter             - Initialize/check counter system
 
 Operation Commands:
   capture                  - Take a photo now
@@ -2166,4 +1858,3 @@ EOF
 esac
 
 # End of script
-
