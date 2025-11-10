@@ -315,6 +315,125 @@ EOF
       echo
     fi
   fi
+  
+    # Configure healthchecks.io monitoring (optional)
+  echo
+  echo "HEALTHCHECKS.IO MONITORING (OPTIONAL)"
+  echo "────────────────────────────────────────────────────────"
+  echo "Monitor internet connectivity with healthchecks.io"
+  echo "  - Pings every 15 minutes"
+  echo "  - Alerts if no ping received within 20 minutes"
+  echo
+  echo "To get your API key:"
+  echo "  1. Go to: https://healthchecks.io"
+  echo "  2. Go to Settings → API Access"
+  echo "  3. Copy your API key"
+  echo
+  echo "Press Enter to use default API key, or enter your own"
+  echo "Enter 'skip' to disable healthchecks monitoring"
+  echo
+  read -rp "Healthchecks API key [default]: " HEALTHCHECKS_API_KEY_INPUT
+  echo
+  
+  # Default API key (pulled from GitHub or hardcoded)
+  DEFAULT_HEALTHCHECKS_API_KEY=${{ secrets.HEALTHCHECK_API_KEY }}
+  
+  HEALTHCHECKS_PING_URL=""
+  
+  # Handle input
+  if [[ "${HEALTHCHECKS_API_KEY_INPUT,,}" == "skip" ]]; then
+    echo "Skipping healthchecks monitoring"
+    HEALTHCHECKS_API_KEY=""
+  elif [[ -z "$HEALTHCHECKS_API_KEY_INPUT" ]]; then
+    echo "Using default API key"
+    HEALTHCHECKS_API_KEY="$DEFAULT_HEALTHCHECKS_API_KEY"
+  else
+    echo "Using provided API key"
+    HEALTHCHECKS_API_KEY="$HEALTHCHECKS_API_KEY_INPUT"
+  fi
+  
+  if [[ -n "$HEALTHCHECKS_API_KEY" ]]; then
+    echo -n "Creating healthcheck for project: $PROJECT_NAME... "
+    
+    # Create the check via API with timeout
+    # Period: 900 seconds (15 minutes)
+    # Grace: 300 seconds (5 minutes)
+    local check_name="${PROJECT_NAME} - Internet Connectivity"
+    
+    # Use timeout command to force kill after 15 seconds
+    local response=$(timeout 15 curl -s -m 10 --connect-timeout 5 -X POST https://healthchecks.io/api/v1/checks/ \
+      -H "X-Api-Key: $HEALTHCHECKS_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"name\": \"$check_name\", \"timeout\": 900, \"grace\": 300, \"schedule\": \"*/15 * * * *\", \"tz\": \"UTC\"}" 2>&1)
+    
+    local curl_exit=$?
+    echo "done"
+    
+    if [[ $curl_exit -eq 124 ]]; then
+      echo "✗ Request timed out after 15 seconds"
+      echo "  Check your internet connection"
+      HEALTHCHECKS_PING_URL=""
+    elif [[ $curl_exit -ne 0 ]]; then
+      echo "✗ Failed to connect to healthchecks.io (exit code: $curl_exit)"
+      echo "  You can add healthchecks later or check your internet connection"
+      HEALTHCHECKS_PING_URL=""
+    else
+      # Extract ping URL and update URL from response
+      HEALTHCHECKS_PING_URL=$(echo "$response" | grep -o '"ping_url": "[^"]*' | cut -d'"' -f4)
+      local update_url=$(echo "$response" | grep -o '"update_url": "[^"]*' | cut -d'"' -f4)
+      
+      if [[ -n "$HEALTHCHECKS_PING_URL" ]]; then
+        echo "✓ Healthcheck created successfully"
+        echo "  Check name: $check_name"
+        echo "  Ping URL: $HEALTHCHECKS_PING_URL"
+        
+        # Now get the list of channels (integrations) to find Slack
+        echo -n "  Configuring Slack notifications... "
+        local channels_response=$(timeout 10 curl -s -m 10 --connect-timeout 5 \
+          -H "X-Api-Key: $HEALTHCHECKS_API_KEY" \
+          https://healthchecks.io/api/v1/channels/ 2>&1)
+        
+        # Extract Slack channel UUID
+        local slack_channel=$(echo "$channels_response" | grep -B2 '"kind": "slack"' | grep -o '"id": "[^"]*' | cut -d'"' -f4 | head -1)
+        
+        if [[ -n "$slack_channel" ]]; then
+          # Update the check to use the Slack channel
+          local assign_response=$(timeout 10 curl -s -m 10 --connect-timeout 5 -X POST "$update_url" \
+            -H "X-Api-Key: $HEALTHCHECKS_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"channels\": \"$slack_channel\"}" 2>&1)
+          
+          if [[ $? -eq 0 ]]; then
+            echo "done"
+            echo "  ✓ Slack notifications enabled"
+          else
+            echo "failed"
+            echo "  ⚠ Could not enable Slack notifications (check will still work)"
+          fi
+        else
+          echo "skipped"
+          echo "  ⚠ No Slack integration found in healthchecks.io"
+          echo "  You can add it manually at https://healthchecks.io"
+        fi
+        
+        echo "  Schedule: Every 15 minutes"
+        echo "  Grace period: 5 minutes"
+      else
+        # Check if there's an error message in the response
+        local error_msg=$(echo "$response" | grep -o '"error": "[^"]*' | cut -d'"' -f4)
+        if [[ -n "$error_msg" ]]; then
+          echo "✗ Failed to create healthcheck: $error_msg"
+        else
+          echo "✗ Failed to create healthcheck"
+          echo "  Response: $response"
+        fi
+        echo "  Please check your API key"
+        HEALTHCHECKS_PING_URL=""
+      fi
+    fi
+  fi
+
+
 
   # persist config
   sudo bash -c "cat > '$CONFIG_FILE' <<EOF
@@ -329,7 +448,9 @@ CLEANUP_TIME=\"${CLEANUP_TIME}\"
 EMAIL_RECIPIENTS=\"${EMAIL_RECIPIENTS}\"
 SLACK_WEBHOOK=\"${SLACK_WEBHOOK}\"
 SLACK_USER_ID=\"${SLACK_USER_ID}\"
+HEALTHCHECKS_PING_URL=\"${HEALTHCHECKS_PING_URL}\"
 EOF"
+
   sudo chmod 600 "$CONFIG_FILE"
   echo
   echo "✓ Saved config to $CONFIG_FILE"
@@ -346,9 +467,32 @@ EOF"
 $SYNC_MIN $SYNC_HOUR * * * root /usr/local/bin/timelapse end_of_day_sync
 $MONTAGE_MIN $MONTAGE_HOUR * * * root /usr/local/bin/timelapse create_daily_montage
 $CLEANUP_MIN $CLEANUP_HOUR * * * root /usr/local/bin/timelapse cleanup_directories
+
+# Internet connectivity monitoring (every 15 minutes)
+$(if [[ -n "$HEALTHCHECKS_PING_URL" ]]; then echo "*/15 * * * * root curl -fsS -m 10 --retry 3 '$HEALTHCHECKS_PING_URL' >/dev/null 2>&1"; fi)
 EOF"
+
   sudo chmod 644 "$CRON_FILE"
   echo "✓ Cron jobs installed in $CRON_FILE"
+
+
+  # Initialize counter
+  echo "═══════════════════════════════════════════════════════"
+  echo "  Initializing counter system..."
+  echo "═══════════════════════════════════════════════════════"
+  echo 
+  init_counter
+  
+  # Try to sync with Google Drive
+  local gdrive_counter=$(read_gdrive_counter)
+  if [ "$gdrive_counter" -eq 0 ]; then
+    echo "Creating counter on Google Drive..."
+    update_gdrive_counter 1
+  else
+    echo "Found existing counter on Google Drive: $(printf "%05d" $gdrive_counter)"
+  fi
+
+  echo "✓ Counter system ready"
 
   echo
   echo "═══════════════════════════════════════════════════════"
@@ -404,6 +548,7 @@ VERBOSE=true                                    # Toggle verbose output
 EMAIL_RECIPIENTS="${EMAIL_RECIPIENTS:-}"
 SLACK_WEBHOOK="${SLACK_WEBHOOK:-}"
 SLACK_USER_ID="${SLACK_USER_ID:-}"
+HEALTHCHECKS_PING_URL="${HEALTHCHECKS_PING_URL:-}"
 # Rate limiting for Slack mentions
 MENTION_COOLDOWN_FILE="/tmp/timelapse_mention_cooldown_${PROJECT_NAME// /_}"
 MENTION_COOLDOWN_SECONDS=3600  # 1 hour
@@ -471,16 +616,103 @@ log() {
 
 # Initialize the counter file if it doesn't exist
 COUNTER_FILE="/var/lib/timelapse/counter.txt"
-if [ ! -f "$COUNTER_FILE" ]; then
-    echo "00001" > "$COUNTER_FILE"
-fi
+GDRIVE_COUNTER_FILE="$GDRIVE_REMOTE:$PROJECT_NAME/.timelapse_counter.txt"
+
+# Function to initialize counter directory
+init_counter() {
+    if [ ! -d "/var/lib/timelapse" ]; then
+        sudo mkdir -p "/var/lib/timelapse"
+        sudo chmod 755 "/var/lib/timelapse"
+    fi
+    
+    if [ ! -f "$COUNTER_FILE" ]; then
+        echo "00001" > "$COUNTER_FILE"
+    fi
+}
+
+# Function to read Google Drive counter
+read_gdrive_counter() {
+    local temp_file=$(mktemp)
+    
+    if rclone copyto "$GDRIVE_COUNTER_FILE" "$temp_file" 2>/dev/null; then
+        local counter=$(cat "$temp_file" | tr -d '\n')
+        rm -f "$temp_file"
+        
+        # Validate: should be exactly 5 digits
+        if [[ "$counter" =~ ^[0-9]{5}$ ]]; then
+            echo "$((10#$counter))"
+        else
+            # Corrupted file - try to extract first 5 digits
+            verbose_log "Warning: Google Drive counter file corrupted, attempting recovery" >&2
+            local extracted=$(echo "$counter" | grep -oE '^[0-9]{1,5}')
+            if [[ -n "$extracted" ]]; then
+                # Pad to 5 digits
+                printf "%d" "$((10#$extracted))"
+            else
+                verbose_log "Warning: Could not recover counter from Google Drive, using 0" >&2
+                echo "0"
+            fi
+        fi
+    else
+        rm -f "$temp_file"
+        echo "0"
+    fi
+}
+
+
+# Function to update Google Drive counter
+update_gdrive_counter() {
+    local counter_value="$1"
+    local temp_file=$(mktemp)
+    
+    printf "%05d" "$counter_value" > "$temp_file"
+    
+    # Try to upload, but don't fail if it doesn't work
+    # Redirect all output to stderr
+    if rclone copyto "$temp_file" "$GDRIVE_COUNTER_FILE" 2>/dev/null; then
+        verbose_log "Google Drive counter synced: $counter_value" >&2
+    else
+        verbose_log "Failed to sync Google Drive counter (will retry later)" >&2
+    fi
+    
+    rm -f "$temp_file"
+}
+
 
 # Function to get and increment the counter
 get_next_counter() {
-    COUNTER=$(cat "$COUNTER_FILE")
-    printf "%05d" "$COUNTER" # Format as a 5-digit number
-    echo $((COUNTER + 1)) > "$COUNTER_FILE"
+    # Initialize if needed
+    init_counter
+    
+    # Get local counter
+    local local_counter=$(cat "$COUNTER_FILE" | tr -d '\n')
+    local_counter=$((10#$local_counter))
+    
+    # Get Google Drive counter
+    local gdrive_counter=$(read_gdrive_counter)
+    
+    # Use whichever is higher
+    local current=$local_counter
+    if [ "$gdrive_counter" -gt "$local_counter" ]; then
+        # Log to stderr so it doesn't get captured
+        verbose_log "Google Drive counter ($gdrive_counter) is higher than local ($local_counter), using Google Drive value" >&2
+        current=$gdrive_counter
+    fi
+    
+    # Increment for next photo
+    local next=$((current + 1))
+    
+    # Save locally
+    printf "%05d" "$next" > "$COUNTER_FILE"
+    
+    # Sync to Google Drive (non-blocking) - redirect output to stderr
+    update_gdrive_counter "$next" >&2
+    
+    # Return ONLY the counter (before increment)
+    printf "%05d" "$current"
 }
+
+
 
 generate_filename() {
     COUNTER=$(get_next_counter) # Get the next counter value
@@ -1787,6 +2019,24 @@ case "${1:-}" in
         echo "No active cooldown"
     fi
     ;;
+  test-healthcheck)
+    if [[ -z "$HEALTHCHECKS_PING_URL" ]]; then
+      echo "Healthchecks not configured"
+      exit 1
+    fi
+    
+    echo "Testing healthchecks.io ping..."
+    echo "Ping URL: $HEALTHCHECKS_PING_URL"
+    
+    if curl -fsS -m 10 --retry 3 "$HEALTHCHECKS_PING_URL"; then
+      echo
+      echo "✓ Ping successful"
+    else
+      echo
+      echo "✗ Ping failed"
+    fi
+    ;;
+  
   test-backup-failure)
     test_backup_failure_scenario
     ;;
