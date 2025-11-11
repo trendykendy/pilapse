@@ -821,7 +821,7 @@ send_email() {
     else
         verbose_log "Failed to send email with attachment to $EMAIL_RECIPIENTS."
         log "Failed to send email with attachment to $EMAIL_RECIPIENTS."
-        notify_slack "<@U0RSCG38X> Failed to send email with attachment for daily montage."
+        notify_slack "$SLACK_USER_ID Failed to send email with attachment for daily montage."
     fi
 }
 
@@ -934,7 +934,7 @@ upload_photo() {
         if [[ $? -ne 0 ]]; then
             verbose_log "Remote file not found: $remote_file_path"
             log "Error: Remote file not found for checksum verification: $photo_path"
-            notify_slack "<@U0RSCG38X> Upload verification failed: Remote file not found\nFile: $photo_filename"
+            notify_slack "$SLACK_USER_ID Upload verification failed: Remote file not found\nFile: $photo_filename"
             return 1
         fi
 
@@ -951,7 +951,7 @@ upload_photo() {
         else
             verbose_log "Checksum mismatch: File may be corrupted. Local: $local_checksum, Remote: $remote_checksum"
             log "Error: Checksum mismatch for $photo_filename"
-            notify_slack "<@U0RSCG38X> Checksum mismatch for photo: $photo_filename\nLocal: $local_checksum\nRemote: $remote_checksum"
+            notify_slack "$SLACK_USER_ID Checksum mismatch for photo: $photo_filename\nLocal: $local_checksum\nRemote: $remote_checksum"
             return 1
         fi
     else
@@ -964,7 +964,7 @@ upload_photo() {
             error_summary="Upload failed (exit code: $upload_result)"
         fi
         
-        notify_slack "<@U0RSCG38X> Upload failed for photo: $photo_filename\nError: $error_summary"
+        notify_slack "$SLACK_USER_ID Upload failed for photo: $photo_filename\nError: $error_summary"
         return 1
     fi
 }
@@ -985,7 +985,7 @@ backup_photo() {
         local error_msg="Failed to create backup directory: $backup_path"
         verbose_log "$error_msg"
         log "Error: $error_msg"
-        notify_slack "<@U0RSCG38X> Backup directory creation failed\nPath: $backup_path\nPossible USB drive failure"
+        notify_slack "$SLACK_USER_ID Backup directory creation failed\nPath: $backup_path\nPossible USB drive failure"
         return 1
     fi
 
@@ -995,7 +995,7 @@ backup_photo() {
     if [[ -z "$original_checksum" ]]; then
         verbose_log "Failed to calculate checksum for original file: $photo_path"
         log "Error: Failed to calculate checksum for original file: $photo_path"
-        notify_slack "<@U0RSCG38X> Checksum calculation failed\nFile: $photo_name"
+        notify_slack "$SLACK_USER_ID Checksum calculation failed\nFile: $photo_name"
         return 1
     fi
 
@@ -1004,7 +1004,7 @@ backup_photo() {
     if [[ $? -ne 0 ]]; then
         verbose_log "Failed to move photo to backup directory: $backup_path"
         log "Error: Failed to back up photo: $photo_path"
-        notify_slack "<@U0RSCG38X> Failed to backup photo\nFile: $photo_name\nError: $mv_error\nPossible USB drive failure"
+        notify_slack "$SLACK_USER_ID Failed to backup photo\nFile: $photo_name\nError: $mv_error\nPossible USB drive failure"
         return 1
     fi
 
@@ -1014,14 +1014,14 @@ backup_photo() {
     if [[ -z "$backup_checksum" ]]; then
         verbose_log "Failed to calculate checksum for backup file: $backup_path/$photo_name"
         log "Error: Failed to calculate checksum for backup file: $backup_path/$photo_name"
-        notify_slack "<@U0RSCG38X> Backup checksum verification failed\nFile: $photo_name\nPossible USB drive failure"
+        notify_slack "$SLACK_USER_ID Backup checksum verification failed\nFile: $photo_name\nPossible USB drive failure"
         return 1
     fi
 
     if [[ "$original_checksum" != "$backup_checksum" ]]; then
         verbose_log "Checksum mismatch: Backup may be corrupted. Original: $original_checksum, Backup: $backup_checksum"
         log "Error: Backup verification failed for photo: $photo_path"
-        notify_slack "<@U0RSCG38X> Backup verification failed\nFile: $photo_name\nOriginal checksum: $original_checksum\nBackup checksum: $backup_checksum\nPossible USB drive failure"
+        notify_slack "$SLACK_USER_ID Backup verification failed\nFile: $photo_name\nOriginal checksum: $original_checksum\nBackup checksum: $backup_checksum\nPossible USB drive failure"
         return 1
     fi
 
@@ -1089,8 +1089,45 @@ end_of_day_sync() {
     successful_uploads=0
     failed_uploads=0
 
-    # Ensure the failed uploads folder exists
-    mkdir -p "$failed_uploads_folder"
+    # Mount USB drive if available
+    local usb_mounted=false
+    local usb_available=false
+    
+    if [[ -n "$DEVICE" ]] && [[ -b "$DEVICE" ]]; then
+        verbose_log "USB device detected: $DEVICE"
+        
+        # Check if already mounted
+        if mountpoint -q "$MOUNT_POINT"; then
+            verbose_log "USB already mounted at $MOUNT_POINT"
+            usb_mounted=true
+            usb_available=true
+        else
+            # Try to mount
+            verbose_log "Attempting to mount USB drive..."
+            mkdir -p "$MOUNT_POINT"
+            if mount "$DEVICE" "$MOUNT_POINT" 2>/dev/null; then
+                verbose_log "✓ USB mounted successfully at $MOUNT_POINT"
+                log "USB drive mounted at $MOUNT_POINT"
+                usb_mounted=true
+                usb_available=true
+            else
+                verbose_log "✗ Failed to mount USB drive"
+                log "Warning: Failed to mount USB drive - failed uploads will not be backed up"
+                notify_slack "⚠️ USB drive failed to mount - failed uploads will not be backed up to USB"
+                usb_available=false
+            fi
+        fi
+    else
+        verbose_log "No USB device configured or detected"
+        log "Warning: No USB device available - failed uploads will not be backed up"
+        usb_available=false
+    fi
+
+    # Only create failed uploads folder if USB is available
+    if [[ "$usb_available" == "true" ]]; then
+        mkdir -p "$failed_uploads_folder"
+        verbose_log "Created failed uploads folder: $failed_uploads_folder"
+    fi
 
     # Populate remote files list
     verbose_log "Fetching file list from remote folder: $remote_folder_path"
@@ -1107,7 +1144,14 @@ end_of_day_sync() {
     if [ ! -d "$backup_folder_path" ]; then
         verbose_log "No backup folder found for today at $backup_folder_path. Skipping sync."
         log "No backup folder found for today at $backup_folder_path. Skipping sync."
-        notify_slack "📁 No backup folder found for today ($DATE). End-of-Day Sync skipped."
+        notify_slack "ℹ️ No backup folder found for today ($DATE). End-of-Day Sync skipped."
+        
+        # Unmount USB if we mounted it
+        if [[ "$usb_mounted" == "true" ]] && ! mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+            umount "$MOUNT_POINT" 2>/dev/null
+            verbose_log "USB unmounted"
+        fi
+        
         return
     fi
 
@@ -1153,9 +1197,18 @@ end_of_day_sync() {
                 verbose_log "Failed to upload: $file"
                 log "Upload failed for file: $file"
 
-                # Move file to failed uploads folder
-                if mv "$file" "$failed_uploads_folder" 2>/dev/null; then
-                    verbose_log "Moved failed file to: $failed_uploads_folder"
+                # Move file to failed uploads folder only if USB is available
+                if [[ "$usb_available" == "true" ]]; then
+                    if mv "$file" "$failed_uploads_folder" 2>/dev/null; then
+                        verbose_log "Moved failed file to USB backup: $failed_uploads_folder"
+                        log "Moved failed file to USB backup: $failed_uploads_folder/$file_name"
+                    else
+                        verbose_log "Failed to move file to USB backup folder"
+                        log "Error: Failed to move file to USB backup: $file"
+                    fi
+                else
+                    verbose_log "USB not available - failed file remains in local backup"
+                    log "Warning: Failed upload remains in local backup (USB not available): $file"
                 fi
             fi
         fi
@@ -1239,7 +1292,11 @@ end_of_day_sync() {
         fi
     fi
     if [ "$failed_uploads" -gt 0 ]; then
-        slack_message+="❌ Failed: $failed_uploads images (moved to USB backup)\n"
+        if [[ "$usb_available" == "true" ]]; then
+            slack_message+="❌ Failed: $failed_uploads images (moved to USB backup)\n"
+        else
+            slack_message+="❌ Failed: $failed_uploads images (kept in local backup - USB not available)\n"
+        fi
     fi
     if [ "$successful_uploads" -eq 0 ] && [ "$failed_uploads" -eq 0 ]; then
         slack_message+="✓ All files already synced - no action needed\n"
@@ -1250,7 +1307,11 @@ end_of_day_sync() {
     slack_message+="☁️ Google Drive: $final_remote_total images"
     
     if [ "$failed_uploads" -gt 0 ]; then
-        slack_message+="\n\n⚠️ $failed_uploads files moved to USB backup folder"
+        if [[ "$usb_available" == "true" ]]; then
+            slack_message+="\n\n⚠️ $failed_uploads files moved to USB backup folder"
+        else
+            slack_message+="\n\n⚠️ $failed_uploads files kept in local backup (USB not available)"
+        fi
     fi
     
     if [ "$unverified_uploads" -gt 0 ]; then
@@ -1259,6 +1320,13 @@ end_of_day_sync() {
 
     # Notify via Slack with verified data
     notify_slack "$slack_message"
+
+    # Unmount USB if we mounted it
+    if [[ "$usb_mounted" == "true" ]]; then
+        umount "$MOUNT_POINT" 2>/dev/null
+        verbose_log "USB unmounted"
+        log "USB drive unmounted"
+    fi
 
     verbose_log "End-of-Day Sync for $DATE completed."
     log "End-of-Day Sync for $DATE completed."
@@ -1331,7 +1399,7 @@ create_daily_montage() {
     montage "${today_thumbnails[@]}" -tile 6x -geometry +2+2 "$temp_montage" || {
         verbose_log "montage command failed."
         log "montage command failed."
-        notify_slack "<@U0RSCG38X> montage command failed."
+        notify_slack "$SLACK_USER_ID montage command failed."
         return
     }
 
